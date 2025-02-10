@@ -4,11 +4,36 @@ import asyncio
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLineEdit, QFileDialog, QLabel, QMenuBar, QMenu, QComboBox, QPlainTextEdit,
-    QCheckBox, QSlider
+    QCheckBox, QSlider, QSizePolicy
 )
-from PySide6.QtGui import QAction, QStandardItemModel, QStandardItem, QFont
+from PySide6.QtGui import QAction, QStandardItemModel, QStandardItem, QFont, QTextOption
 from PySide6.QtCore import Qt, QThread, Signal, Slot
-from converter import convert_file, OUTPUT_FOLDER, get_input_bitrate
+from converter import convert_file, OUTPUT_FOLDER, get_input_bitrate, run_ffmpeg, get_ffmpeg_path
+
+# Helper function to run a full ffmpeg command for GIF conversion.
+
+
+def convert_file_with_full_args(args: list) -> str:
+    import asyncio
+    ffmpeg_path = get_ffmpeg_path()
+    cmd = [ffmpeg_path] + args
+    print(f"Running command: {' '.join(cmd)}")
+
+    async def run_cmd():
+        from asyncio.subprocess import PIPE
+        process = await asyncio.create_subprocess_exec(*cmd, stdout=PIPE, stderr=PIPE)
+        stdout, stderr = await process.communicate()
+        log = ""
+        if stdout:
+            log += f"[stdout]\n{stdout.decode()}\n"
+        if stderr:
+            log += f"[stderr]\n{stderr.decode()}\n"
+        if process.returncode != 0:
+            raise RuntimeError(
+                f"Command failed with code {process.returncode}. Log: {log}"
+            )
+        return log
+    return asyncio.run(run_cmd())
 
 
 class ConversionWorker(QThread):
@@ -28,31 +53,48 @@ class ConversionWorker(QThread):
         import os
         try:
             ext = os.path.splitext(self.output_file)[1].lower()
-            # Handle GIF conversion separately (do not append bitrate options)
+            # --- GIF Conversion Branch ---
             if ext == '.gif':
-                if self.extra_args is None:
-                    base_extra_args = [
-                        "-vf", "fps=10,scale=320:-1:flags=lanczos"]
-                else:
-                    base_extra_args = self.extra_args.copy()
-                log = asyncio.run(convert_file(
-                    self.input_file, self.output_file, base_extra_args))
-            # For video conversions other than GIF (e.g. MP4)
+                desired_fps = 30 if self.quality >= 80 else 10
+                palette_file = os.path.join(OUTPUT_FOLDER, "palette_temp.png")
+                try:
+                    # First pass: generate the palette.
+                    palette_args = [
+                        "-y", "-i", self.input_file,
+                        "-vf", f"fps={desired_fps},scale=320:-1:flags=lanczos,palettegen",
+                        palette_file
+                    ]
+                    ret = asyncio.run(run_ffmpeg(palette_args))
+                    if ret != 0:
+                        raise RuntimeError(
+                            "Palette generation for GIF failed.")
+                    # Second pass: create the GIF using the palette.
+                    gif_args = [
+                        "-y", "-i", self.input_file, "-i", palette_file,
+                        "-filter_complex", f"fps={desired_fps},scale=320:-1:flags=lanczos[x];[x][1:v]paletteuse",
+                        self.output_file
+                    ]
+                    log = convert_file_with_full_args(gif_args)
+                finally:
+                    if os.path.exists(palette_file):
+                        try:
+                            os.remove(palette_file)
+                        except Exception:
+                            pass
+            # --- Video Conversions (MP4, WEBM, MKV) ---
             elif ext in ['.mp4', '.webm', '.mkv']:
                 input_bitrate = get_input_bitrate(self.input_file)
                 bitrate_arg = None
                 if input_bitrate:
-                    # Calculate target bitrate based on slider quality.
                     target_bitrate = int(input_bitrate * self.quality / 100)
                     target_bitrate_k = target_bitrate // 1000
                     bitrate_arg = f"{target_bitrate_k}k"
-                # Prepare base extra_args (if not provided, use a default for libx264)
                 if self.extra_args is None:
-                    base_extra_args = ["-c:v", "libx264",
-                                       "-preset", "fast", "-crf", "23"]
+                    base_extra_args = ["-pix_fmt", "yuv420p", "-r", "60"]
+                    base_extra_args += ["-c:v", "libx264",
+                                        "-preset", "fast", "-crf", "23"]
                 else:
                     base_extra_args = self.extra_args.copy()
-                # If GPU acceleration is enabled, switch codec to NVENC.
                 if self.use_gpu:
                     if "-c:v" in base_extra_args:
                         idx = base_extra_args.index("-c:v")
@@ -70,13 +112,16 @@ class ConversionWorker(QThread):
                             "-bufsize", f"{(target_bitrate_k * 2)}k"
                         ]
                 else:
-                    # For CPU conversion, you can opt to add the bitrate option (if desired).
                     if bitrate_arg:
                         base_extra_args += ["-b:v", bitrate_arg]
+                if "-r" not in base_extra_args:
+                    base_extra_args += ["-r", "60"]
+                if "-pix_fmt" not in base_extra_args:
+                    base_extra_args += ["-pix_fmt", "yuv420p"]
                 log = asyncio.run(convert_file(
                     self.input_file, self.output_file, base_extra_args))
+            # --- Other Conversions (e.g. Audio) ---
             else:
-                # For non-video conversions (e.g., audio extraction)
                 log = asyncio.run(convert_file(
                     self.input_file, self.output_file, self.extra_args))
             self.conversionFinished.emit(
@@ -95,34 +140,27 @@ class MainWindow(QMainWindow):
         self.initUI()
 
     def initUI(self):
-        # Menu Bar
         menu_bar = QMenuBar(self)
         self.setMenuBar(menu_bar)
-
         file_menu = QMenu("File", self)
         menu_bar.addMenu(file_menu)
         exit_action = QAction("Exit", self)
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
-
         edit_menu = QMenu("Edit", self)
         menu_bar.addMenu(edit_menu)
-
         help_menu = QMenu("Help", self)
         menu_bar.addMenu(help_menu)
         about_action = QAction("About", self)
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
-
         settings_menu = QMenu("Settings", self)
         menu_bar.addMenu(settings_menu)
 
-        # Central Widget and layout
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
 
-        # File selection layout
         file_layout = QHBoxLayout()
         self.input_line_edit = QLineEdit()
         self.input_line_edit.setPlaceholderText("Select input file...")
@@ -132,7 +170,6 @@ class MainWindow(QMainWindow):
         file_layout.addWidget(browse_button)
         main_layout.addLayout(file_layout)
 
-        # Output file layout
         output_layout = QHBoxLayout()
         self.output_line_edit = QLineEdit()
         self.output_line_edit.setPlaceholderText("Select output file...")
@@ -142,7 +179,6 @@ class MainWindow(QMainWindow):
         output_layout.addWidget(output_browse_button)
         main_layout.addLayout(output_layout)
 
-        # Output Format dropdown layout
         format_layout = QHBoxLayout()
         format_label = QLabel("Output Format:")
         self.output_format_combo = QComboBox()
@@ -153,13 +189,11 @@ class MainWindow(QMainWindow):
         format_layout.addWidget(self.output_format_combo)
         main_layout.addLayout(format_layout)
 
-        # GPU Acceleration Checkbox
         gpu_layout = QHBoxLayout()
         self.gpu_checkbox = QCheckBox("Use GPU")
         gpu_layout.addWidget(self.gpu_checkbox)
         main_layout.addLayout(gpu_layout)
 
-        # Quality Slider Layout
         quality_layout = QVBoxLayout()
         quality_label = QLabel("Quality:")
         quality_layout.addWidget(quality_label)
@@ -170,7 +204,6 @@ class MainWindow(QMainWindow):
         self.quality_slider.setTickInterval(10)
         self.quality_slider.setTickPosition(QSlider.TicksBelow)
         self.quality_slider.setValue(100)
-        # Fix the slider width to roughly 25-30% of the window width (e.g., 150px)
         self.quality_slider.setFixedWidth(150)
         self.quality_slider.valueChanged.connect(self.update_quality_label)
         slider_layout.addWidget(self.quality_slider)
@@ -179,31 +212,32 @@ class MainWindow(QMainWindow):
         quality_layout.addLayout(slider_layout)
         main_layout.addLayout(quality_layout)
 
-        # Convert button
         self.convert_button = QPushButton("Convert")
         self.convert_button.clicked.connect(self.start_conversion)
         main_layout.addWidget(self.convert_button)
 
-        # Status label
         self.status_label = QLabel("")
         main_layout.addWidget(self.status_label)
 
-        # Log text box for FFmpeg output
         self.log_text_edit = QPlainTextEdit()
         self.log_text_edit.setReadOnly(True)
         self.log_text_edit.setPlaceholderText(
             "Conversion log output will appear here...")
-        # Enable word wrapping and constrain the height so it doesn't stretch the window
         self.log_text_edit.setLineWrapMode(QPlainTextEdit.WidgetWidth)
         self.log_text_edit.setFixedHeight(150)
+        self.log_text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        text_option = QTextOption()
+        text_option.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        self.log_text_edit.document().setDefaultTextOption(text_option)
+        self.log_text_edit.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.log_text_edit.setFixedWidth(580)
         main_layout.addWidget(self.log_text_edit)
 
     def populate_output_format_combo(self):
+        from PySide6.QtGui import QStandardItemModel, QStandardItem, QFont
         model = QStandardItemModel()
         bold_font = QFont()
         bold_font.setBold(True)
-
-        # Video header (non-selectable)
         header_video = QStandardItem("Video:")
         header_video.setFlags(Qt.NoItemFlags)
         header_video.setFont(bold_font)
@@ -211,8 +245,6 @@ class MainWindow(QMainWindow):
         for fmt in ["mp4", "webm", "mkv"]:
             item = QStandardItem("   " + fmt)
             model.appendRow(item)
-
-        # Audio header
         header_audio = QStandardItem("Audio:")
         header_audio.setFlags(Qt.NoItemFlags)
         header_audio.setFont(bold_font)
@@ -220,15 +252,12 @@ class MainWindow(QMainWindow):
         for fmt in ["mp3", "wav"]:
             item = QStandardItem("   " + fmt)
             model.appendRow(item)
-
-        # GIF header
         header_gif = QStandardItem("GIF:")
         header_gif.setFlags(Qt.NoItemFlags)
         header_gif.setFont(bold_font)
         model.appendRow(header_gif)
         item = QStandardItem("   gif")
         model.appendRow(item)
-
         self.output_format_combo.setModel(model)
         self.output_format_combo.setCurrentIndex(1)
 
@@ -247,6 +276,7 @@ class MainWindow(QMainWindow):
                 OUTPUT_FOLDER, base + "." + selected_format))
 
     def browse_file(self):
+        from PySide6.QtWidgets import QFileDialog
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Select Video File", "",
             "Video Files (*.mp4 *.mkv *.webm *.avi *.mov *.flv *.wmv *.mpeg *.mpg)"
@@ -259,6 +289,7 @@ class MainWindow(QMainWindow):
                 os.path.join(OUTPUT_FOLDER, base + "." + fmt))
 
     def browse_output_file(self):
+        from PySide6.QtWidgets import QFileDialog
         file_path, _ = QFileDialog.getSaveFileName(
             self, "Select Output File", OUTPUT_FOLDER, "All Files (*)"
         )
@@ -275,18 +306,15 @@ class MainWindow(QMainWindow):
             self.status_label.setText(
                 "Please select both input and output files.")
             return
-
         self.convert_button.setEnabled(False)
         self.status_label.setText("Conversion in progress...")
-
         selected_format = self.get_selected_format().lower()
         extra_args = None
         if selected_format == "gif":
+            # This will be overridden by our two-pass method.
             extra_args = ["-vf", "fps=10,scale=320:-1:flags=lanczos"]
-
         use_gpu = self.gpu_checkbox.isChecked()
         quality = self.quality_slider.value()
-
         self.worker = ConversionWorker(
             input_file, output_file, extra_args, use_gpu, quality)
         self.worker.conversionFinished.connect(self.conversion_finished)

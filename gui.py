@@ -4,10 +4,10 @@ import asyncio
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLineEdit, QFileDialog, QLabel, QMenuBar, QMenu, QComboBox, QPlainTextEdit,
-    QCheckBox, QSlider, QListWidget, QSizePolicy, QProgressBar, QGroupBox
+    QCheckBox, QSlider, QListWidget, QSizePolicy, QProgressBar, QGroupBox, QMenu
 )
 from PySide6.QtGui import QAction, QStandardItemModel, QStandardItem, QFont, QTextOption
-from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer, QSettings
+from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer, QSettings, QPoint
 from converter import convert_file, OUTPUT_FOLDER, get_input_bitrate, run_ffmpeg, get_ffmpeg_path
 
 # Helper function to run a full ffmpeg command for GIF conversion.
@@ -134,7 +134,6 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Vidium Video Converter")
         self.resize(800, 600)
-        self.input_files = []  # Will use the QListWidget contents.
         self.current_index = 0
         self.overall_progress = 0.0
         self.settings = QSettings("MyCompany", "VidiumConverter")
@@ -145,57 +144,99 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(main_widget)
         main_layout = QVBoxLayout(main_widget)
 
-        # --- Input Files Group ---
+        # --- Top Area: Input Files and Preview side-by-side ---
+        top_layout = QHBoxLayout()
+        # Input Group (Left)
         input_group = QGroupBox("Add input file(s)")
         input_layout = QVBoxLayout(input_group)
         self.input_list = QListWidget()
+        self.input_list.setMinimumHeight(200)
+        self.input_list.setStyleSheet(
+            "QListWidget { margin-left: 0px; margin-right: 0px; }")
+        self.input_list.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.input_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.input_list.customContextMenuRequested.connect(
+            self.input_list_context_menu)
         input_layout.addWidget(self.input_list)
         self.input_browse_button = QPushButton("Browse")
+        self.input_browse_button.setFixedWidth(87)
         self.input_browse_button.clicked.connect(self.browse_input_files)
         input_layout.addWidget(self.input_browse_button)
-        main_layout.addWidget(input_group)
+        top_layout.addWidget(input_group)
+        # Preview Group (Right) - empty for now.
+        preview_group = QGroupBox("Preview")
+        preview_layout = QVBoxLayout(preview_group)
+        preview_group.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Expanding)
+        top_layout.addWidget(preview_group)
+        main_layout.addLayout(top_layout)
 
-        # --- Output Folder Area (placed below input group) ---
-        output_layout = QHBoxLayout()
+        # --- Output Folder Area (below top area) ---
+        out_addr_layout = QHBoxLayout()
+        out_addr_layout.setSpacing(0)
+        out_addr_layout.setContentsMargins(0, 0, 0, 0)
+        out_addr_layout.setAlignment(Qt.AlignLeft)
         out_folder_label = QLabel("Output Folder:")
-        output_layout.addWidget(out_folder_label)
+        out_folder_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        out_addr_layout.addWidget(out_folder_label)
+        # Add a small spacing (10px) after the label
+        out_addr_layout.addSpacing(10)
         self.output_folder_edit = QLineEdit()
-        # Load default folder from QSettings; if not set, use OUTPUT_FOLDER.
         default_folder = self.settings.value(
             "default_output_folder", OUTPUT_FOLDER)
         self.output_folder_edit.setText(default_folder)
-        output_layout.addWidget(self.output_folder_edit)
+        self.output_folder_edit.setFixedWidth(300)
+        out_addr_layout.addWidget(self.output_folder_edit)
+        main_layout.addLayout(out_addr_layout)
+
+        # --- Buttons below the address bar ---
+        out_buttons_layout = QHBoxLayout()
+        out_buttons_layout.setAlignment(Qt.AlignLeft)
+        self.output_browse_button = QPushButton("Browse")
+        out_buttons_layout.addWidget(self.output_browse_button)
+        self.goto_folder_button = QPushButton("Go To Folder")
+        out_buttons_layout.addWidget(self.goto_folder_button)
         self.default_checkbox = QCheckBox("Default")
         default_checked = self.settings.value(
             "default_checked", True, type=bool)
         self.default_checkbox.setChecked(default_checked)
+        out_buttons_layout.addWidget(self.default_checkbox)
+        out_buttons_layout.addStretch()
+        main_layout.addLayout(out_buttons_layout)
+        self.output_browse_button.clicked.connect(self.browse_output_folder)
+        self.goto_folder_button.clicked.connect(self.goto_output_folder)
         self.default_checkbox.stateChanged.connect(
             self.default_checkbox_changed)
-        output_layout.addWidget(self.default_checkbox)
-        self.output_browse_button = QPushButton("Browse")
-        self.output_browse_button.clicked.connect(self.browse_output_folder)
-        output_layout.addWidget(self.output_browse_button)
-        self.goto_folder_button = QPushButton("Go To Folder")
-        self.goto_folder_button.clicked.connect(self.goto_output_folder)
-        output_layout.addWidget(self.goto_folder_button)
-        main_layout.addLayout(output_layout)
 
-        # --- Output Format Dropdown ---
+        # --- Output Format Dropdown (label and combo directly adjacent) ---
         format_layout = QHBoxLayout()
+        format_layout.setSpacing(0)
+        format_layout.setContentsMargins(0, 0, 0, 0)
+        format_layout.setAlignment(Qt.AlignLeft)
         format_label = QLabel("Output Format:")
+        format_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        format_layout.addWidget(format_label)
+        # Add a small spacing (10px) after the label
+        format_layout.addSpacing(10)
         self.output_format_combo = QComboBox()
         self.populate_output_format_combo()
-        format_layout.addWidget(format_label)
         format_layout.addWidget(self.output_format_combo)
         main_layout.addLayout(format_layout)
 
-        # --- Options: GPU and Quality ---
-        options_layout = QHBoxLayout()
+        # --- Options: GPU (top row) and Quality (directly below) ---
+        options_layout = QVBoxLayout()
         self.gpu_checkbox = QCheckBox("Use GPU")
         options_layout.addWidget(self.gpu_checkbox)
         quality_layout = QHBoxLayout()
+        quality_layout.setSpacing(0)
+        quality_layout.setContentsMargins(0, 0, 0, 0)
+        quality_layout.setAlignment(Qt.AlignLeft)
         quality_label = QLabel("Quality:")
+        quality_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         quality_layout.addWidget(quality_label)
+        # Add a small spacing (10px) after the label
+        quality_layout.addSpacing(10)
         self.quality_slider = QSlider(Qt.Horizontal)
         self.quality_slider.setMinimum(10)
         self.quality_slider.setMaximum(100)
@@ -206,28 +247,30 @@ class MainWindow(QMainWindow):
         self.quality_slider.valueChanged.connect(self.update_quality_label)
         quality_layout.addWidget(self.quality_slider)
         self.quality_value_label = QLabel("100%")
+        self.quality_value_label.setSizePolicy(
+            QSizePolicy.Fixed, QSizePolicy.Fixed)
         quality_layout.addWidget(self.quality_value_label)
         options_layout.addLayout(quality_layout)
         main_layout.addLayout(options_layout)
 
         # --- Convert Button ---
         self.convert_button = QPushButton("Convert")
+        self.convert_button.setFixedSize(120, 60)
+        font = self.convert_button.font()
+        font.setPointSize(font.pointSize() * 2)
+        self.convert_button.setFont(font)
+        main_layout.addWidget(self.convert_button, alignment=Qt.AlignLeft)
         self.convert_button.clicked.connect(self.start_conversion_queue)
-        main_layout.addWidget(self.convert_button)
 
         # --- Progress Section ---
-        # Current File Progress
         self.current_progress_label = QLabel("Current File Progress: 0%")
         main_layout.addWidget(self.current_progress_label)
         self.current_progress_bar = QProgressBar()
         self.current_progress_bar.setMinimum(0)
         self.current_progress_bar.setMaximum(100)
         self.current_progress_bar.setValue(0)
-        # 50% of console log width (~406*0.5)
         self.current_progress_bar.setFixedWidth(203)
         main_layout.addWidget(self.current_progress_bar)
-
-        # Overall Progress
         self.overall_progress_label = QLabel("Overall Progress: 0%")
         main_layout.addWidget(self.overall_progress_label)
         self.overall_progress_bar = QProgressBar()
@@ -244,7 +287,7 @@ class MainWindow(QMainWindow):
             "Conversion log output will appear here...")
         self.log_text_edit.setLineWrapMode(QPlainTextEdit.WidgetWidth)
         self.log_text_edit.setFixedHeight(150)
-        self.log_text_edit.setFixedWidth(406)  # 70% of previous 580 width
+        self.log_text_edit.setFixedWidth(406)
         self.log_text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         text_option = QTextOption()
         text_option.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
@@ -252,7 +295,7 @@ class MainWindow(QMainWindow):
         self.log_text_edit.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         main_layout.addWidget(self.log_text_edit)
 
-        # Initialize variables for queue progress simulation.
+        # --- Conversion Queue and Progress Simulation ---
         self.conversion_queue = []
         self.total_files = 0
         self.current_index = 0
@@ -261,6 +304,7 @@ class MainWindow(QMainWindow):
         self.current_file_progress = 0
 
     def populate_output_format_combo(self):
+        from PySide6.QtGui import QStandardItemModel, QStandardItem, QFont
         model = QStandardItemModel()
         bold_font = QFont()
         bold_font.setBold(True)
@@ -299,6 +343,16 @@ class MainWindow(QMainWindow):
             for f in files:
                 self.input_list.addItem(f)
 
+    def input_list_context_menu(self, point: QPoint):
+        item = self.input_list.itemAt(point)
+        if item is not None:
+            menu = QMenu()
+            remove_action = menu.addAction("Remove")
+            action = menu.exec(self.input_list.mapToGlobal(point))
+            if action == remove_action:
+                row = self.input_list.row(item)
+                self.input_list.takeItem(row)
+
     def browse_output_folder(self):
         folder = QFileDialog.getExistingDirectory(
             self, "Select Output Folder", OUTPUT_FOLDER
@@ -318,7 +372,6 @@ class MainWindow(QMainWindow):
 
     def default_checkbox_changed(self, state):
         if state == Qt.Checked:
-            # When checked, set output folder to default OUTPUT_FOLDER and make read-only.
             self.output_folder_edit.setText(OUTPUT_FOLDER)
             self.output_folder_edit.setReadOnly(True)
             self.settings.setValue("default_output_folder", OUTPUT_FOLDER)
@@ -354,7 +407,6 @@ class MainWindow(QMainWindow):
         self.start_next_conversion()
 
     def progress_label_update(self):
-        # Update the overall progress label with current file info.
         if self.current_index < self.total_files:
             current_file = os.path.basename(
                 self.conversion_queue[self.current_index][0])
@@ -386,10 +438,9 @@ class MainWindow(QMainWindow):
                 self.file_conversion_finished)
             self.worker.conversionError.connect(self.file_conversion_error)
             self.worker.logMessage.connect(self.append_log)
-            # Reset current file progress and start timer to simulate gradual progress.
             self.current_file_progress = 0
             self.current_progress_bar.setValue(self.current_file_progress)
-            self.file_timer.start(200)  # update every 200ms
+            self.file_timer.start(500)
             self.worker.start()
         else:
             self.overall_progress_bar.setValue(100)
@@ -397,9 +448,8 @@ class MainWindow(QMainWindow):
             self.convert_button.setEnabled(True)
 
     def update_current_progress(self):
-        # Simulate gradual increase of current file progress.
         if self.current_file_progress < 100:
-            self.current_file_progress += 5
+            self.current_file_progress += 2
             if self.current_file_progress > 100:
                 self.current_file_progress = 100
             self.current_progress_bar.setValue(self.current_file_progress)
@@ -438,7 +488,6 @@ class MainWindow(QMainWindow):
         return text
 
     def output_format_changed(self):
-        # No action needed in queue mode.
         pass
 
     def show_about(self):

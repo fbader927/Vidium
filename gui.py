@@ -93,6 +93,7 @@ class ConversionWorker(QThread):
                 else:
                     base_extra_args = self.extra_args.copy()
                 if self.use_gpu:
+                    # Modify encoding settings to use NVENC
                     if "-c:v" in base_extra_args:
                         idx = base_extra_args.index("-c:v")
                         base_extra_args[idx+1] = "h264_nvenc"
@@ -115,8 +116,9 @@ class ConversionWorker(QThread):
                     base_extra_args += ["-r", "60"]
                 if "-pix_fmt" not in base_extra_args:
                     base_extra_args += ["-pix_fmt", "yuv420p"]
+                # Call convert_file with the GPU flag set appropriately.
                 log = asyncio.run(convert_file(
-                    self.input_file, self.output_file, base_extra_args))
+                    self.input_file, self.output_file, base_extra_args, use_gpu=self.use_gpu))
             # --- Other Conversions (e.g., Audio) ---
             else:
                 log = asyncio.run(convert_file(

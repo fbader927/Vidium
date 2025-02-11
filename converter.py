@@ -100,20 +100,30 @@ async def run_ffmpeg(args: list) -> int:
     return process.returncode
 
 
-async def convert_file(input_file: str, output_file: str, extra_args: list = None) -> str:
+async def convert_file(input_file: str, output_file: str, extra_args: list = None, use_gpu: bool = False) -> str:
     r"""
     Converts an input file to any desired format.
     
-    This is a generic conversion function. If extra_args is provided,
-    the FFmpeg command will be:
-      ffmpeg -y -i input_file <extra_args> output_file
+    If use_gpu is True, the function injects CUDA-based decoding flags (using CUVID)
+    before the input file and then applies the extra_args (typically specifying NVENC for encoding).
+    
+    This results in a command of the form:
+      ffmpeg -y -hwaccel cuda -hwaccel_output_format cuda -c:v h264_cuvid -i input_file <extra_args> output_file
+    
     Otherwise, a default conversion is applied (re-encoding with libx264).
     
     Returns the FFmpeg log output as a string.
     """
     if extra_args is None:
         extra_args = ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
-    args = ["-y", "-i", input_file] + extra_args + [output_file]
+    if use_gpu:
+        # Insert GPU decoding flags before the input file.
+        gpu_flags = ["-hwaccel", "cuda", "-hwaccel_output_format",
+                     "cuda", "-c:v", "h264_cuvid"]
+        args = ["-y"] + gpu_flags + ["-i", input_file] + \
+            extra_args + [output_file]
+    else:
+        args = ["-y", "-i", input_file] + extra_args + [output_file]
     ffmpeg_path = get_ffmpeg_path()
     cmd = [ffmpeg_path] + args
     print(f"Running command: {' '.join(cmd)}")
@@ -130,6 +140,7 @@ async def convert_file(input_file: str, output_file: str, extra_args: list = Non
         )
     print(f"Conversion completed: {output_file}")
     return log
+
 
 # For quick manual testing from the command line.
 if __name__ == "__main__":
@@ -152,7 +163,10 @@ if __name__ == "__main__":
         mp4_output = os.path.join(OUTPUT_FOLDER, base + ".mp4")
         try:
             print("Starting conversion to MP4...")
-            log = await convert_file(test_video, mp4_output)
+            # Example using GPU acceleration:
+            log = await convert_file(test_video, mp4_output, use_gpu=True,
+                                     extra_args=["-r", "60", "-pix_fmt", "yuv420p", "-c:v", "h264_nvenc",
+                                                 "-preset", "fast", "-crf", "23"])
             print(log)
         except Exception as e:
             print(f"Error during MP4 conversion: {e}", file=sys.stderr)

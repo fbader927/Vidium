@@ -138,6 +138,8 @@ class MainWindow(QMainWindow):
         self.overall_progress = 0.0
         self.settings = QSettings("MyCompany", "VidiumConverter")
         self.initUI()
+        self.setAcceptDrops(True)
+        self.init_drop_overlay()
 
     def initUI(self):
         main_widget = QWidget()
@@ -303,6 +305,20 @@ class MainWindow(QMainWindow):
         self.file_timer.timeout.connect(self.update_current_progress)
         self.current_file_progress = 0
 
+    def init_drop_overlay(self):
+        """Initializes the drop overlay that appears when files are dragged over the window."""
+        self.drop_overlay = QWidget(self)
+        self.drop_overlay.setGeometry(self.rect())
+        # For light mode, we darken the window slightly
+        self.drop_overlay.setStyleSheet(
+            "background-color: rgba(0, 0, 0, 0.2);")
+        self.drop_overlay.hide()
+        self.overlay_label = QLabel("Drop Files Here", self.drop_overlay)
+        self.overlay_label.setStyleSheet("color: white; font-size: 24pt;")
+        self.overlay_label.setAlignment(Qt.AlignCenter)
+        layout = QVBoxLayout(self.drop_overlay)
+        layout.addWidget(self.overlay_label, alignment=Qt.AlignCenter)
+
     def populate_output_format_combo(self):
         from PySide6.QtGui import QStandardItemModel, QStandardItem, QFont
         model = QStandardItemModel()
@@ -341,7 +357,9 @@ class MainWindow(QMainWindow):
         )
         if files:
             for f in files:
-                self.input_list.addItem(f)
+                # Only add if not already in the list
+                if not self.file_already_added(f):
+                    self.input_list.addItem(f)
 
     def input_list_context_menu(self, point: QPoint):
         item = self.input_list.itemAt(point)
@@ -493,6 +511,60 @@ class MainWindow(QMainWindow):
     def show_about(self):
         self.status_label.setText(
             "Vidium Video Converter v1.0\nBuilt with PySide6 and bundled FFmpeg.")
+
+    # --- Drag and Drop Event Handlers ---
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            self.show_drop_overlay()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self.hide_drop_overlay()
+        event.accept()
+
+    def dropEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            self.hide_drop_overlay()
+            urls = event.mimeData().urls()
+            for url in urls:
+                file_path = url.toLocalFile()
+                if self.is_supported_file(file_path) and not self.file_already_added(file_path):
+                    self.input_list.addItem(file_path)
+        else:
+            event.ignore()
+
+    def is_supported_file(self, file_path):
+        supported_exts = {'.mp4', '.mkv', '.webm', '.avi',
+                          '.mov', '.flv', '.wmv', '.mpeg', '.mpg'}
+        ext = os.path.splitext(file_path)[1].lower()
+        return ext in supported_exts
+
+    def file_already_added(self, file_path):
+        for i in range(self.input_list.count()):
+            if self.input_list.item(i).text() == file_path:
+                return True
+        return False
+
+    def show_drop_overlay(self):
+        self.drop_overlay.setGeometry(self.rect())
+        self.drop_overlay.show()
+
+    def hide_drop_overlay(self):
+        self.drop_overlay.hide()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, 'drop_overlay'):
+            self.drop_overlay.setGeometry(self.rect())
 
 
 if __name__ == "__main__":

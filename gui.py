@@ -6,12 +6,28 @@ from PySide6.QtWidgets import (
     QLineEdit, QFileDialog, QLabel, QMenu, QComboBox, QPlainTextEdit,
     QCheckBox, QSlider, QListWidget, QSizePolicy, QProgressBar, QGroupBox, QStyle
 )
-from PySide6.QtGui import QStandardItemModel, QStandardItem, QFont, QTextOption
+from PySide6.QtGui import QStandardItemModel, QStandardItem, QFont, QTextOption, QPainter
 from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer, QSettings, QPoint, QUrl, QSize
 from converter import convert_file, OUTPUT_FOLDER, get_input_bitrate, run_ffmpeg, get_ffmpeg_path
 # Imports for video preview
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
+
+# --- Custom QListWidget with placeholder text when empty ---
+
+
+class PlaceholderListWidget(QListWidget):
+    def __init__(self, placeholder, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.placeholder = placeholder
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.count() == 0:
+            painter = QPainter(self.viewport())
+            painter.setPen(Qt.gray)
+            painter.drawText(self.viewport().rect(),
+                             Qt.AlignCenter, self.placeholder)
 
 
 def convert_file_with_full_args(args: list) -> str:
@@ -205,7 +221,9 @@ class MainWindow(QMainWindow):
         top_layout = QHBoxLayout()
         input_group = QGroupBox("Add input file(s)")
         input_layout = QVBoxLayout(input_group)
-        self.input_list = QListWidget()
+        # Use our custom list widget with placeholder text
+        self.input_list = PlaceholderListWidget(
+            "Add, or Drag and Drop in Files")
         self.input_list.setMinimumHeight(200)
         self.input_list.setStyleSheet(
             "QListWidget { margin-left: 0px; margin-right: 0px; }")
@@ -316,7 +334,7 @@ class MainWindow(QMainWindow):
 
         # --- Options: GPU and Quality ---
         options_layout = QVBoxLayout()
-        self.gpu_checkbox = QCheckBox("Use GPU")
+        self.gpu_checkbox = QCheckBox("Use GPU (Very Fast)")
         options_layout.addWidget(self.gpu_checkbox)
         quality_layout = QHBoxLayout()
         quality_layout.setSpacing(0)
@@ -344,11 +362,9 @@ class MainWindow(QMainWindow):
 
         # --- Convert and Stop Buttons ---
         button_layout = QHBoxLayout()
-        button_layout.setContentsMargins(0, 0, 0, 0)  # Remove outer margins
-        button_layout.setSpacing(0)  # No spacing between buttons
-        button_layout.setAlignment(Qt.AlignLeft)   # Align to left
-
-        # Create the Convert button and remove internal margins/padding
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        button_layout.setSpacing(0)
+        button_layout.setAlignment(Qt.AlignLeft)
         self.convert_button = QPushButton("Convert")
         self.convert_button.setFixedSize(120, 60)
         font = self.convert_button.font()
@@ -356,8 +372,6 @@ class MainWindow(QMainWindow):
         self.convert_button.setFont(font)
         self.convert_button.setStyleSheet("margin: 0px; padding: 0px;")
         button_layout.addWidget(self.convert_button)
-
-        # Create the Stop button, remove internal margins/padding, and place it immediately after
         self.stop_button = QPushButton("Stop")
         self.stop_button.setFixedSize(120, 60)
         self.stop_button.setFont(font)
@@ -365,7 +379,6 @@ class MainWindow(QMainWindow):
         self.stop_button.clicked.connect(self.stop_conversion)
         self.stop_button.setEnabled(False)
         button_layout.addWidget(self.stop_button)
-
         main_layout.addLayout(button_layout)
         self.convert_button.clicked.connect(self.start_conversion_queue)
 
@@ -411,7 +424,6 @@ class MainWindow(QMainWindow):
         self.current_file_progress = 0
 
     def init_drop_overlay(self):
-        """Initializes the drop overlay that appears when files are dragged over the window."""
         self.drop_overlay = QWidget(self)
         self.drop_overlay.setGeometry(self.rect())
         self.drop_overlay.setStyleSheet(
@@ -465,6 +477,7 @@ class MainWindow(QMainWindow):
                     self.input_list.addItem(f)
             if self.input_list.currentItem() is None and self.input_list.count() > 0:
                 self.input_list.setCurrentRow(0)
+        # (No extra code is needed here because the placeholder will show automatically when the list is empty.)
 
     def input_list_context_menu(self, point: QPoint):
         item = self.input_list.itemAt(point)
@@ -478,8 +491,7 @@ class MainWindow(QMainWindow):
 
     def browse_output_folder(self):
         folder = QFileDialog.getExistingDirectory(
-            self, "Select Output Folder", OUTPUT_FOLDER
-        )
+            self, "Select Output Folder", OUTPUT_FOLDER)
         if folder:
             self.output_folder_edit.setText(folder)
             self.default_checkbox.setChecked(False)
@@ -608,6 +620,9 @@ class MainWindow(QMainWindow):
         self.current_file_progress = 100
         self.current_progress_bar.setValue(self.current_file_progress)
         self.append_log(f"{output_file}: {message}")
+        # Remove the converted file from the input list
+        if self.input_list.count() > 0:
+            self.input_list.takeItem(0)
         self.current_index += 1
         overall = int((self.current_index / self.total_files)*100)
         self.overall_progress_bar.setValue(overall)
@@ -622,6 +637,9 @@ class MainWindow(QMainWindow):
     def file_conversion_error(self, error_message):
         self.file_timer.stop()
         self.append_log(f"Error: {error_message}")
+        # Remove the errored file from the input list
+        if self.input_list.count() > 0:
+            self.input_list.takeItem(0)
         self.current_index += 1
         overall = int((self.current_index / self.total_files)*100)
         self.overall_progress_bar.setValue(overall)

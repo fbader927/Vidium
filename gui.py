@@ -244,14 +244,12 @@ class MainWindow(QMainWindow):
         video_controls_layout = QHBoxLayout()
         self.toggle_button = QPushButton()
         self.toggle_button.setFixedSize(40, 40)
-        # Use standard icons for high quality appearance
         self.play_icon = self.style().standardIcon(QStyle.SP_MediaPlay)
         self.pause_icon = self.style().standardIcon(QStyle.SP_MediaPause)
         self.toggle_button.setIcon(self.play_icon)
         self.toggle_button.setIconSize(QSize(32, 32))
         self.toggle_button.clicked.connect(self.toggle_play_pause)
         video_controls_layout.addWidget(self.toggle_button)
-        # Volume slider: note that volume is set on the QAudioOutput and is a float [0.0, 1.0]
         self.volume_slider = QSlider(Qt.Horizontal)
         self.volume_slider.setRange(0, 100)
         self.volume_slider.setValue(100)
@@ -346,18 +344,28 @@ class MainWindow(QMainWindow):
 
         # --- Convert and Stop Buttons ---
         button_layout = QHBoxLayout()
+        button_layout.setContentsMargins(0, 0, 0, 0)  # Remove outer margins
+        button_layout.setSpacing(0)  # No spacing between buttons
+        button_layout.setAlignment(Qt.AlignLeft)   # Align to left
+
+        # Create the Convert button and remove internal margins/padding
         self.convert_button = QPushButton("Convert")
         self.convert_button.setFixedSize(120, 60)
         font = self.convert_button.font()
         font.setPointSize(font.pointSize() * 2)
         self.convert_button.setFont(font)
-        button_layout.addWidget(self.convert_button, alignment=Qt.AlignLeft)
+        self.convert_button.setStyleSheet("margin: 0px; padding: 0px;")
+        button_layout.addWidget(self.convert_button)
+
+        # Create the Stop button, remove internal margins/padding, and place it immediately after
         self.stop_button = QPushButton("Stop")
         self.stop_button.setFixedSize(120, 60)
         self.stop_button.setFont(font)
+        self.stop_button.setStyleSheet("margin: 0px; padding: 0px;")
         self.stop_button.clicked.connect(self.stop_conversion)
         self.stop_button.setEnabled(False)
-        button_layout.addWidget(self.stop_button, alignment=Qt.AlignLeft)
+        button_layout.addWidget(self.stop_button)
+
         main_layout.addLayout(button_layout)
         self.convert_button.clicked.connect(self.start_conversion_queue)
 
@@ -455,7 +463,6 @@ class MainWindow(QMainWindow):
             for f in files:
                 if not self.file_already_added(f):
                     self.input_list.addItem(f)
-            # Set the first file as default preview if none selected
             if self.input_list.currentItem() is None and self.input_list.count() > 0:
                 self.input_list.setCurrentRow(0)
 
@@ -501,11 +508,9 @@ class MainWindow(QMainWindow):
             file_path = current.text()
             self.media_player.setSource(QUrl.fromLocalFile(file_path))
             self.media_player.pause()
-            # Reset the toggle button icon to the play icon when a new video is selected
             self.toggle_button.setIcon(self.play_icon)
 
     def toggle_play_pause(self):
-        # Toggle the play/pause state using playbackState() (new in Qt6)
         if self.media_player.playbackState() == QMediaPlayer.PlayingState:
             self.media_player.pause()
             self.toggle_button.setIcon(self.play_icon)

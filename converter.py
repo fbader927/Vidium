@@ -81,37 +81,51 @@ def get_input_bitrate(input_file: str) -> int:
     return None
 
 
-async def run_ffmpeg(args: list) -> int:
+async def run_ffmpeg(args: list, stop_event: asyncio.Event = None) -> int:
     r"""
-    Executes an FFmpeg command asynchronously.
+    Executes an FFmpeg command asynchronously with optional stop event.
     
     :param args: List of command-line arguments (excluding the ffmpeg executable)
-    :return: The process return code
+    :param stop_event: An asyncio.Event that when set, will abort the conversion.
+    :return: The process return code, or -1 if cancelled.
     """
     ffmpeg_path = get_ffmpeg_path()
     cmd = [ffmpeg_path] + args
     print(f"Running command: {' '.join(cmd)}")
     process = await asyncio.create_subprocess_exec(*cmd, stdout=PIPE, stderr=PIPE)
-    stdout, stderr = await process.communicate()
-    if stdout:
-        print(f"[stdout]\n{stdout.decode()}")
-    if stderr:
-        print(f"[stderr]\n{stderr.decode()}", file=sys.stderr)
-    return process.returncode
+    if stop_event is None:
+        stdout, stderr = await process.communicate()
+        if stdout:
+            print(f"[stdout]\n{stdout.decode()}")
+        if stderr:
+            print(f"[stderr]\n{stderr.decode()}", file=sys.stderr)
+        return process.returncode
+    else:
+        wait_tasks = [
+            asyncio.create_task(process.communicate()),
+            asyncio.create_task(stop_event.wait())
+        ]
+        done, pending = await asyncio.wait(wait_tasks, return_when=asyncio.FIRST_COMPLETED)
+        if wait_tasks[1] in done:
+            process.kill()
+            await process.wait()
+            for t in pending:
+                t.cancel()
+            return -1
+        else:
+            for t in pending:
+                t.cancel()
+            stdout, stderr = wait_tasks[0].result()
+            if stdout:
+                print(f"[stdout]\n{stdout.decode()}")
+            if stderr:
+                print(f"[stderr]\n{stderr.decode()}", file=sys.stderr)
+            return process.returncode
 
 
-async def convert_file(input_file: str, output_file: str, extra_args: list = None, use_gpu: bool = False) -> str:
+async def convert_file(input_file: str, output_file: str, extra_args: list = None, use_gpu: bool = False, stop_event: asyncio.Event = None) -> str:
     r"""
-    Converts an input file to any desired format.
-    
-    If use_gpu is True, the function injects CUDA-based decoding flags using -hwaccel cuda
-    and forces the hwaccel output format to nv12 (which NVENC requires) before the input file.
-    Then extra_args are applied.
-    
-    This results in a command of the form:
-      ffmpeg -y -hwaccel cuda -hwaccel_output_format nv12 -i input_file <extra_args> output_file
-    
-    Otherwise, a default conversion is applied (re-encoding with libx264).
+    Converts an input file to any desired format asynchronously, with support for cancellation.
     
     Returns the FFmpeg log output as a string.
     """
@@ -127,18 +141,49 @@ async def convert_file(input_file: str, output_file: str, extra_args: list = Non
     cmd = [ffmpeg_path] + args
     print(f"Running command: {' '.join(cmd)}")
     process = await asyncio.create_subprocess_exec(*cmd, stdout=PIPE, stderr=PIPE)
-    stdout, stderr = await process.communicate()
-    log = ""
-    if stdout:
-        log += f"[stdout]\n{stdout.decode()}\n"
-    if stderr:
-        log += f"[stderr]\n{stderr.decode()}\n"
-    if process.returncode != 0:
-        raise RuntimeError(
-            f"Conversion failed for {input_file} (return code {process.returncode}). Log: {log}"
-        )
-    print(f"Conversion completed: {output_file}")
-    return log
+    if stop_event is None:
+        stdout, stderr = await process.communicate()
+        log = ""
+        if stdout:
+            log += f"[stdout]\n{stdout.decode()}\n"
+        if stderr:
+            log += f"[stderr]\n{stderr.decode()}\n"
+        if process.returncode != 0:
+            raise RuntimeError(
+                f"Conversion failed for {input_file} (return code {process.returncode}). Log: {log}"
+            )
+        print(f"Conversion completed: {output_file}")
+        return log
+    else:
+        wait_tasks = [
+            asyncio.create_task(process.communicate()),
+            asyncio.create_task(stop_event.wait())
+        ]
+        done, pending = await asyncio.wait(wait_tasks, return_when=asyncio.FIRST_COMPLETED)
+        if wait_tasks[1] in done:
+            process.kill()
+            await process.wait()
+            for t in pending:
+                t.cancel()
+            if os.path.exists(output_file):
+                os.remove(output_file)
+            raise asyncio.CancelledError("Conversion was stopped.")
+        else:
+            for t in pending:
+                t.cancel()
+            stdout, stderr = wait_tasks[0].result()
+            log = ""
+            if stdout:
+                log += f"[stdout]\n{stdout.decode()}\n"
+            if stderr:
+                log += f"[stderr]\n{stderr.decode()}\n"
+            if process.returncode != 0:
+                raise RuntimeError(
+                    f"Conversion failed for {input_file} (return code {process.returncode}). Log: {log}"
+                )
+            print(f"Conversion completed: {output_file}")
+            return log
+
 
 # For quick manual testing from the command line.
 if __name__ == "__main__":
@@ -160,8 +205,6 @@ if __name__ == "__main__":
         mp4_output = os.path.join(OUTPUT_FOLDER, base + ".mp4")
         try:
             print("Starting conversion to MP4...")
-            # For GPU acceleration, we use preset fast and NVENC.
-            # If the input file is .webm, we add parallelism options.
             gpu_extra_args = ["-r", "60", "-c:v",
                               "h264_nvenc", "-preset", "fast"]
             if test_video.lower().endswith(".webm"):

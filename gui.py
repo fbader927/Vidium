@@ -4,11 +4,14 @@ import asyncio
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLineEdit, QFileDialog, QLabel, QMenu, QComboBox, QPlainTextEdit,
-    QCheckBox, QSlider, QListWidget, QSizePolicy, QProgressBar, QGroupBox
+    QCheckBox, QSlider, QListWidget, QSizePolicy, QProgressBar, QGroupBox, QStyle
 )
 from PySide6.QtGui import QStandardItemModel, QStandardItem, QFont, QTextOption
-from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer, QSettings, QPoint
+from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer, QSettings, QPoint, QUrl, QSize
 from converter import convert_file, OUTPUT_FOLDER, get_input_bitrate, run_ffmpeg, get_ffmpeg_path
+# Imports for video preview
+from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PySide6.QtMultimediaWidgets import QVideoWidget
 
 
 def convert_file_with_full_args(args: list) -> str:
@@ -28,7 +31,8 @@ def convert_file_with_full_args(args: list) -> str:
             log += f"[stderr]\n{stderr.decode()}\n"
         if process.returncode != 0:
             raise RuntimeError(
-                f"Command failed with code {process.returncode}. Log: {log}")
+                f"Command failed with code {process.returncode}. Log: {log}"
+            )
         return log
     return asyncio.run(run_cmd())
 
@@ -45,89 +49,135 @@ class ConversionWorker(QThread):
         self.extra_args = extra_args
         self.use_gpu = use_gpu
         self.quality = quality
+        self._stop_event = None  # Will be created in run()
+
+    def stop(self):
+        # Method to stop the conversion process
+        if self._stop_event:
+            self._stop_event.set()
+
+    async def run_command_with_args(self, args: list) -> str:
+        ffmpeg_path = get_ffmpeg_path()
+        cmd = [ffmpeg_path] + args
+        print(f"Running command: {' '.join(cmd)}")
+        from asyncio.subprocess import PIPE
+        process = await asyncio.create_subprocess_exec(*cmd, stdout=PIPE, stderr=PIPE)
+        wait_tasks = [
+            asyncio.create_task(process.communicate()),
+            asyncio.create_task(self._stop_event.wait())
+        ]
+        done, pending = await asyncio.wait(wait_tasks, return_when=asyncio.FIRST_COMPLETED)
+        if wait_tasks[1] in done:
+            process.kill()
+            await process.wait()
+            for t in pending:
+                t.cancel()
+            if os.path.exists(self.output_file):
+                os.remove(self.output_file)
+            raise asyncio.CancelledError("Conversion was stopped.")
+        else:
+            for t in pending:
+                t.cancel()
+            stdout, stderr = wait_tasks[0].result()
+            log = ""
+            if stdout:
+                log += f"[stdout]\n{stdout.decode()}\n"
+            if stderr:
+                log += f"[stderr]\n{stderr.decode()}\n"
+            if process.returncode != 0:
+                raise RuntimeError(
+                    f"Conversion failed for {self.input_file} (return code {process.returncode}). Log: {log}"
+                )
+            return log
+
+    async def do_conversion(self):
+        import os
+        from converter import run_ffmpeg  # ensure using updated run_ffmpeg
+        ext = os.path.splitext(self.output_file)[1].lower()
+        log = ""
+        if ext == '.gif':
+            desired_fps = 30 if self.quality >= 80 else 10
+            palette_file = os.path.join(OUTPUT_FOLDER, "palette_temp.png")
+            try:
+                palette_args = [
+                    "-y", "-i", self.input_file,
+                    "-vf", f"fps={desired_fps},scale=320:-1:flags=lanczos,palettegen",
+                    palette_file
+                ]
+                ret = await run_ffmpeg(palette_args, self._stop_event)
+                if ret != 0:
+                    raise RuntimeError("Palette generation for GIF failed.")
+                gif_args = [
+                    "-y", "-i", self.input_file, "-i", palette_file,
+                    "-filter_complex", f"fps={desired_fps},scale=320:-1:flags=lanczos[x];[x][1:v]paletteuse",
+                    self.output_file
+                ]
+                log = await self.run_command_with_args(gif_args)
+            finally:
+                if os.path.exists(palette_file):
+                    try:
+                        os.remove(palette_file)
+                    except Exception:
+                        pass
+        elif ext in ['.mp4', '.webm', '.mkv']:
+            input_bitrate = get_input_bitrate(self.input_file)
+            bitrate_arg = None
+            if input_bitrate:
+                target_bitrate = int(input_bitrate * self.quality / 100)
+                target_bitrate_k = target_bitrate // 1000
+                bitrate_arg = f"{target_bitrate_k}k"
+            if self.extra_args is None:
+                base_extra_args = ["-pix_fmt", "yuv420p", "-r", "60",
+                                   "-c:v", "libx264", "-preset", "fast", "-crf", "23"]
+            else:
+                base_extra_args = self.extra_args.copy()
+            if self.use_gpu:
+                if "-pix_fmt" in base_extra_args:
+                    idx = base_extra_args.index("-pix_fmt")
+                    del base_extra_args[idx:idx+2]
+                if "-crf" in base_extra_args:
+                    idx = base_extra_args.index("-crf")
+                    del base_extra_args[idx:idx+2]
+                if "-c:v" in base_extra_args:
+                    idx = base_extra_args.index("-c:v")
+                    base_extra_args[idx+1] = "h264_nvenc"
+                else:
+                    base_extra_args = ["-c:v", "h264_nvenc",
+                                       "-preset", "fast"] + base_extra_args
+                if self.input_file.lower().endswith(".webm"):
+                    base_extra_args += ["-tile-columns",
+                                        "6", "-frame-parallel", "1"]
+                if bitrate_arg:
+                    base_extra_args += ["-b:v", bitrate_arg, "-maxrate",
+                                        bitrate_arg, "-bufsize", f"{(target_bitrate_k * 2)}k"]
+            else:
+                if bitrate_arg:
+                    base_extra_args += ["-b:v", bitrate_arg]
+            if "-r" not in base_extra_args:
+                base_extra_args += ["-r", "60"]
+            if "-pix_fmt" not in base_extra_args:
+                base_extra_args += ["-pix_fmt", "yuv420p"]
+            from converter import convert_file
+            log = await convert_file(self.input_file, self.output_file, base_extra_args, use_gpu=self.use_gpu, stop_event=self._stop_event)
+        else:
+            from converter import convert_file
+            log = await convert_file(self.input_file, self.output_file, self.extra_args, stop_event=self._stop_event)
+        return log
 
     def run(self):
-        import os
+        import asyncio
+        self._stop_event = asyncio.Event()
         try:
-            ext = os.path.splitext(self.output_file)[1].lower()
-            # --- GIF Conversion Branch ---
-            if ext == '.gif':
-                desired_fps = 30 if self.quality >= 80 else 10
-                palette_file = os.path.join(OUTPUT_FOLDER, "palette_temp.png")
-                try:
-                    palette_args = [
-                        "-y", "-i", self.input_file,
-                        "-vf", f"fps={desired_fps},scale=320:-1:flags=lanczos,palettegen",
-                        palette_file
-                    ]
-                    ret = asyncio.run(run_ffmpeg(palette_args))
-                    if ret != 0:
-                        raise RuntimeError(
-                            "Palette generation for GIF failed.")
-                    gif_args = [
-                        "-y", "-i", self.input_file, "-i", palette_file,
-                        "-filter_complex", f"fps={desired_fps},scale=320:-1:flags=lanczos[x];[x][1:v]paletteuse",
-                        self.output_file
-                    ]
-                    log = convert_file_with_full_args(gif_args)
-                finally:
-                    if os.path.exists(palette_file):
-                        try:
-                            os.remove(palette_file)
-                        except Exception:
-                            pass
-            # --- Video Conversions (MP4, WEBM, MKV) ---
-            elif ext in ['.mp4', '.webm', '.mkv']:
-                input_bitrate = get_input_bitrate(self.input_file)
-                bitrate_arg = None
-                if input_bitrate:
-                    target_bitrate = int(input_bitrate * self.quality / 100)
-                    target_bitrate_k = target_bitrate // 1000
-                    bitrate_arg = f"{target_bitrate_k}k"
-                if self.extra_args is None:
-                    base_extra_args = ["-pix_fmt", "yuv420p", "-r", "60",
-                                       "-c:v", "libx264", "-preset", "fast", "-crf", "23"]
-                else:
-                    base_extra_args = self.extra_args.copy()
-                if self.use_gpu:
-                    # Remove CPU-only options.
-                    if "-pix_fmt" in base_extra_args:
-                        idx = base_extra_args.index("-pix_fmt")
-                        del base_extra_args[idx:idx+2]
-                    if "-crf" in base_extra_args:
-                        idx = base_extra_args.index("-crf")
-                        del base_extra_args[idx:idx+2]
-                    # Modify to use NVENC.
-                    if "-c:v" in base_extra_args:
-                        idx = base_extra_args.index("-c:v")
-                        base_extra_args[idx+1] = "h264_nvenc"
-                    else:
-                        base_extra_args = ["-c:v", "h264_nvenc",
-                                           "-preset", "fast"] + base_extra_args
-                    # If the input file is .webm, add parallelism options.
-                    if self.input_file.lower().endswith(".webm"):
-                        base_extra_args += ["-tile-columns",
-                                            "6", "-frame-parallel", "1"]
-                    if bitrate_arg:
-                        base_extra_args += ["-b:v", bitrate_arg,
-                                            "-maxrate", bitrate_arg,
-                                            "-bufsize", f"{(target_bitrate_k * 2)}k"]
-                else:
-                    if bitrate_arg:
-                        base_extra_args += ["-b:v", bitrate_arg]
-                if "-r" not in base_extra_args:
-                    base_extra_args += ["-r", "60"]
-                if "-pix_fmt" not in base_extra_args:
-                    base_extra_args += ["-pix_fmt", "yuv420p"]
-                log = asyncio.run(convert_file(
-                    self.input_file, self.output_file, base_extra_args, use_gpu=self.use_gpu))
-            # --- Other Conversions (e.g., Audio) ---
-            else:
-                log = asyncio.run(convert_file(
-                    self.input_file, self.output_file, self.extra_args))
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            log = loop.run_until_complete(self.do_conversion())
             self.conversionFinished.emit(
-                self.output_file, "Conversion completed successfully.")
+                self.output_file, "Conversion completed successfully."
+            )
             self.logMessage.emit(log)
+        except asyncio.CancelledError as ce:
+            self.conversionError.emit("Conversion stopped by user.")
+            self.logMessage.emit(str(ce))
         except Exception as e:
             self.conversionError.emit(str(e))
             self.logMessage.emit(str(e))
@@ -141,6 +191,7 @@ class MainWindow(QMainWindow):
         self.current_index = 0
         self.overall_progress = 0.0
         self.settings = QSettings("MyCompany", "VidiumConverter")
+        self.conversion_aborted = False
         self.initUI()
         self.setAcceptDrops(True)
         self.init_drop_overlay()
@@ -169,12 +220,51 @@ class MainWindow(QMainWindow):
         self.input_browse_button.clicked.connect(self.browse_input_files)
         input_layout.addWidget(self.input_browse_button)
         top_layout.addWidget(input_group)
+
         preview_group = QGroupBox("Preview")
         preview_layout = QVBoxLayout(preview_group)
         preview_group.setSizePolicy(
             QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Video player setup
+        self.video_widget = QVideoWidget()
+        preview_layout.addWidget(self.video_widget)
+        self.media_player = QMediaPlayer()
+        self.audio_output = QAudioOutput()
+        self.media_player.setAudioOutput(self.audio_output)
+        self.media_player.setVideoOutput(self.video_widget)
+        self.media_player.pause()  # Paused by default
+        # Slider for video progress
+        self.video_slider = QSlider(Qt.Horizontal)
+        preview_layout.addWidget(self.video_slider)
+        self.media_player.positionChanged.connect(self.video_slider.setValue)
+        self.media_player.durationChanged.connect(
+            lambda d: self.video_slider.setRange(0, d))
+        self.video_slider.sliderMoved.connect(self.media_player.setPosition)
+        # --- Video Control: Toggle Play/Pause Button and Volume Slider ---
+        video_controls_layout = QHBoxLayout()
+        self.toggle_button = QPushButton()
+        self.toggle_button.setFixedSize(40, 40)
+        # Use standard icons for high quality appearance
+        self.play_icon = self.style().standardIcon(QStyle.SP_MediaPlay)
+        self.pause_icon = self.style().standardIcon(QStyle.SP_MediaPause)
+        self.toggle_button.setIcon(self.play_icon)
+        self.toggle_button.setIconSize(QSize(32, 32))
+        self.toggle_button.clicked.connect(self.toggle_play_pause)
+        video_controls_layout.addWidget(self.toggle_button)
+        # Volume slider: note that volume is set on the QAudioOutput and is a float [0.0, 1.0]
+        self.volume_slider = QSlider(Qt.Horizontal)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setValue(100)
+        self.volume_slider.setFixedWidth(100)
+        self.volume_slider.valueChanged.connect(
+            lambda val: self.audio_output.setVolume(val/100.0))
+        video_controls_layout.addWidget(self.volume_slider)
+        preview_layout.addLayout(video_controls_layout)
         top_layout.addWidget(preview_group)
         main_layout.addLayout(top_layout)
+
+        # Connect input list selection to preview update
+        self.input_list.currentItemChanged.connect(self.preview_selected_video)
 
         # --- Output Folder Area ---
         out_addr_layout = QHBoxLayout()
@@ -254,13 +344,21 @@ class MainWindow(QMainWindow):
         options_layout.addLayout(quality_layout)
         main_layout.addLayout(options_layout)
 
-        # --- Convert Button ---
+        # --- Convert and Stop Buttons ---
+        button_layout = QHBoxLayout()
         self.convert_button = QPushButton("Convert")
         self.convert_button.setFixedSize(120, 60)
         font = self.convert_button.font()
         font.setPointSize(font.pointSize() * 2)
         self.convert_button.setFont(font)
-        main_layout.addWidget(self.convert_button, alignment=Qt.AlignLeft)
+        button_layout.addWidget(self.convert_button, alignment=Qt.AlignLeft)
+        self.stop_button = QPushButton("Stop")
+        self.stop_button.setFixedSize(120, 60)
+        self.stop_button.setFont(font)
+        self.stop_button.clicked.connect(self.stop_conversion)
+        self.stop_button.setEnabled(False)
+        button_layout.addWidget(self.stop_button, alignment=Qt.AlignLeft)
+        main_layout.addLayout(button_layout)
         self.convert_button.clicked.connect(self.start_conversion_queue)
 
         # --- Progress Section ---
@@ -357,6 +455,9 @@ class MainWindow(QMainWindow):
             for f in files:
                 if not self.file_already_added(f):
                     self.input_list.addItem(f)
+            # Set the first file as default preview if none selected
+            if self.input_list.currentItem() is None and self.input_list.count() > 0:
+                self.input_list.setCurrentRow(0)
 
     def input_list_context_menu(self, point: QPoint):
         item = self.input_list.itemAt(point)
@@ -395,6 +496,23 @@ class MainWindow(QMainWindow):
             self.output_folder_edit.setReadOnly(False)
             self.settings.setValue("default_checked", False)
 
+    def preview_selected_video(self, current, previous):
+        if current:
+            file_path = current.text()
+            self.media_player.setSource(QUrl.fromLocalFile(file_path))
+            self.media_player.pause()
+            # Reset the toggle button icon to the play icon when a new video is selected
+            self.toggle_button.setIcon(self.play_icon)
+
+    def toggle_play_pause(self):
+        # Toggle the play/pause state using playbackState() (new in Qt6)
+        if self.media_player.playbackState() == QMediaPlayer.PlayingState:
+            self.media_player.pause()
+            self.toggle_button.setIcon(self.play_icon)
+        else:
+            self.media_player.play()
+            self.toggle_button.setIcon(self.pause_icon)
+
     def start_conversion_queue(self):
         count = self.input_list.count()
         if count == 0:
@@ -419,6 +537,8 @@ class MainWindow(QMainWindow):
         self.overall_progress_bar.setValue(0)
         self.progress_label_update()
         self.convert_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+        self.conversion_aborted = False
         self.start_next_conversion()
 
     def progress_label_update(self):
@@ -441,6 +561,10 @@ class MainWindow(QMainWindow):
             f"Overall Progress: {overall_percent}%")
 
     def start_next_conversion(self):
+        if self.conversion_aborted:
+            self.convert_button.setEnabled(True)
+            self.stop_button.setEnabled(False)
+            return
         if self.current_index < self.total_files:
             input_file, output_file = self.conversion_queue[self.current_index]
             self.progress_label_update()
@@ -461,6 +585,7 @@ class MainWindow(QMainWindow):
             self.overall_progress_bar.setValue(100)
             self.progress_label_update()
             self.convert_button.setEnabled(True)
+            self.stop_button.setEnabled(False)
 
     def update_current_progress(self):
         if self.current_file_progress < 100:
@@ -481,7 +606,12 @@ class MainWindow(QMainWindow):
         self.current_index += 1
         overall = int((self.current_index / self.total_files)*100)
         self.overall_progress_bar.setValue(overall)
-        self.start_next_conversion()
+        if self.conversion_aborted:
+            self.convert_button.setEnabled(True)
+            self.stop_button.setEnabled(False)
+            self.append_log("Conversion aborted.")
+        else:
+            self.start_next_conversion()
 
     @Slot(str)
     def file_conversion_error(self, error_message):
@@ -490,7 +620,12 @@ class MainWindow(QMainWindow):
         self.current_index += 1
         overall = int((self.current_index / self.total_files)*100)
         self.overall_progress_bar.setValue(overall)
-        self.start_next_conversion()
+        if self.conversion_aborted:
+            self.convert_button.setEnabled(True)
+            self.stop_button.setEnabled(False)
+            self.append_log("Conversion aborted.")
+        else:
+            self.start_next_conversion()
 
     @Slot(str)
     def append_log(self, text):
@@ -536,6 +671,8 @@ class MainWindow(QMainWindow):
                 file_path = url.toLocalFile()
                 if self.is_supported_file(file_path) and not self.file_already_added(file_path):
                     self.input_list.addItem(file_path)
+            if self.input_list.currentItem() is None and self.input_list.count() > 0:
+                self.input_list.setCurrentRow(0)
         else:
             event.ignore()
 
@@ -562,6 +699,14 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         if hasattr(self, 'drop_overlay'):
             self.drop_overlay.setGeometry(self.rect())
+
+    def stop_conversion(self):
+        if hasattr(self, 'worker') and self.worker.isRunning():
+            self.conversion_aborted = True
+            self.worker.stop()
+            self.append_log("Stop requested. Conversion will be aborted.")
+            self.convert_button.setEnabled(True)
+            self.stop_button.setEnabled(False)
 
 
 if __name__ == "__main__":

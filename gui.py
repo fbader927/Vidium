@@ -3,14 +3,12 @@ import os
 import asyncio
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QLineEdit, QFileDialog, QLabel, QMenuBar, QMenu, QComboBox, QPlainTextEdit,
-    QCheckBox, QSlider, QListWidget, QSizePolicy, QProgressBar, QGroupBox, QMenu
+    QLineEdit, QFileDialog, QLabel, QMenu, QComboBox, QPlainTextEdit,
+    QCheckBox, QSlider, QListWidget, QSizePolicy, QProgressBar, QGroupBox
 )
-from PySide6.QtGui import QAction, QStandardItemModel, QStandardItem, QFont, QTextOption
+from PySide6.QtGui import QStandardItemModel, QStandardItem, QFont, QTextOption
 from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer, QSettings, QPoint
 from converter import convert_file, OUTPUT_FOLDER, get_input_bitrate, run_ffmpeg, get_ffmpeg_path
-
-# Helper function to run a full ffmpeg command for GIF conversion.
 
 
 def convert_file_with_full_args(args: list) -> str:
@@ -87,28 +85,33 @@ class ConversionWorker(QThread):
                     target_bitrate_k = target_bitrate // 1000
                     bitrate_arg = f"{target_bitrate_k}k"
                 if self.extra_args is None:
-                    base_extra_args = ["-pix_fmt", "yuv420p", "-r", "60"]
-                    base_extra_args += ["-c:v", "libx264",
-                                        "-preset", "fast", "-crf", "23"]
+                    base_extra_args = ["-pix_fmt", "yuv420p", "-r", "60",
+                                       "-c:v", "libx264", "-preset", "fast", "-crf", "23"]
                 else:
                     base_extra_args = self.extra_args.copy()
                 if self.use_gpu:
-                    # Modify encoding settings to use NVENC
+                    # Remove CPU-only options.
+                    if "-pix_fmt" in base_extra_args:
+                        idx = base_extra_args.index("-pix_fmt")
+                        del base_extra_args[idx:idx+2]
+                    if "-crf" in base_extra_args:
+                        idx = base_extra_args.index("-crf")
+                        del base_extra_args[idx:idx+2]
+                    # Modify to use NVENC.
                     if "-c:v" in base_extra_args:
                         idx = base_extra_args.index("-c:v")
                         base_extra_args[idx+1] = "h264_nvenc"
                     else:
                         base_extra_args = ["-c:v", "h264_nvenc",
                                            "-preset", "fast"] + base_extra_args
-                    if "-crf" in base_extra_args:
-                        idx = base_extra_args.index("-crf")
-                        del base_extra_args[idx:idx+2]
+                    # If the input file is .webm, add parallelism options.
+                    if self.input_file.lower().endswith(".webm"):
+                        base_extra_args += ["-tile-columns",
+                                            "6", "-frame-parallel", "1"]
                     if bitrate_arg:
-                        base_extra_args += [
-                            "-b:v", bitrate_arg,
-                            "-maxrate", bitrate_arg,
-                            "-bufsize", f"{(target_bitrate_k * 2)}k"
-                        ]
+                        base_extra_args += ["-b:v", bitrate_arg,
+                                            "-maxrate", bitrate_arg,
+                                            "-bufsize", f"{(target_bitrate_k * 2)}k"]
                 else:
                     if bitrate_arg:
                         base_extra_args += ["-b:v", bitrate_arg]
@@ -116,7 +119,6 @@ class ConversionWorker(QThread):
                     base_extra_args += ["-r", "60"]
                 if "-pix_fmt" not in base_extra_args:
                     base_extra_args += ["-pix_fmt", "yuv420p"]
-                # Call convert_file with the GPU flag set appropriately.
                 log = asyncio.run(convert_file(
                     self.input_file, self.output_file, base_extra_args, use_gpu=self.use_gpu))
             # --- Other Conversions (e.g., Audio) ---
@@ -150,7 +152,6 @@ class MainWindow(QMainWindow):
 
         # --- Top Area: Input Files and Preview side-by-side ---
         top_layout = QHBoxLayout()
-        # Input Group (Left)
         input_group = QGroupBox("Add input file(s)")
         input_layout = QVBoxLayout(input_group)
         self.input_list = QListWidget()
@@ -168,7 +169,6 @@ class MainWindow(QMainWindow):
         self.input_browse_button.clicked.connect(self.browse_input_files)
         input_layout.addWidget(self.input_browse_button)
         top_layout.addWidget(input_group)
-        # Preview Group (Right) - empty for now.
         preview_group = QGroupBox("Preview")
         preview_layout = QVBoxLayout(preview_group)
         preview_group.setSizePolicy(
@@ -176,7 +176,7 @@ class MainWindow(QMainWindow):
         top_layout.addWidget(preview_group)
         main_layout.addLayout(top_layout)
 
-        # --- Output Folder Area (below top area) ---
+        # --- Output Folder Area ---
         out_addr_layout = QHBoxLayout()
         out_addr_layout.setSpacing(0)
         out_addr_layout.setContentsMargins(0, 0, 0, 0)
@@ -184,7 +184,6 @@ class MainWindow(QMainWindow):
         out_folder_label = QLabel("Output Folder:")
         out_folder_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         out_addr_layout.addWidget(out_folder_label)
-        # Add a small spacing (10px) after the label
         out_addr_layout.addSpacing(10)
         self.output_folder_edit = QLineEdit()
         default_folder = self.settings.value(
@@ -213,7 +212,7 @@ class MainWindow(QMainWindow):
         self.default_checkbox.stateChanged.connect(
             self.default_checkbox_changed)
 
-        # --- Output Format Dropdown (label and combo directly adjacent) ---
+        # --- Output Format Dropdown ---
         format_layout = QHBoxLayout()
         format_layout.setSpacing(0)
         format_layout.setContentsMargins(0, 0, 0, 0)
@@ -221,14 +220,13 @@ class MainWindow(QMainWindow):
         format_label = QLabel("Output Format:")
         format_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         format_layout.addWidget(format_label)
-        # Add a small spacing (10px) after the label
         format_layout.addSpacing(10)
         self.output_format_combo = QComboBox()
         self.populate_output_format_combo()
         format_layout.addWidget(self.output_format_combo)
         main_layout.addLayout(format_layout)
 
-        # --- Options: GPU (top row) and Quality (directly below) ---
+        # --- Options: GPU and Quality ---
         options_layout = QVBoxLayout()
         self.gpu_checkbox = QCheckBox("Use GPU")
         options_layout.addWidget(self.gpu_checkbox)
@@ -239,7 +237,6 @@ class MainWindow(QMainWindow):
         quality_label = QLabel("Quality:")
         quality_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         quality_layout.addWidget(quality_label)
-        # Add a small spacing (10px) after the label
         quality_layout.addSpacing(10)
         self.quality_slider = QSlider(Qt.Horizontal)
         self.quality_slider.setMinimum(10)
@@ -311,7 +308,6 @@ class MainWindow(QMainWindow):
         """Initializes the drop overlay that appears when files are dragged over the window."""
         self.drop_overlay = QWidget(self)
         self.drop_overlay.setGeometry(self.rect())
-        # For light mode, we darken the window slightly
         self.drop_overlay.setStyleSheet(
             "background-color: rgba(0, 0, 0, 0.2);")
         self.drop_overlay.hide()
@@ -359,7 +355,6 @@ class MainWindow(QMainWindow):
         )
         if files:
             for f in files:
-                # Only add if not already in the list
                 if not self.file_already_added(f):
                     self.input_list.addItem(f)
 

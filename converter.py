@@ -104,11 +104,12 @@ async def convert_file(input_file: str, output_file: str, extra_args: list = Non
     r"""
     Converts an input file to any desired format.
     
-    If use_gpu is True, the function injects CUDA-based decoding flags (using CUVID)
-    before the input file and then applies the extra_args (typically specifying NVENC for encoding).
+    If use_gpu is True, the function injects CUDA-based decoding flags using -hwaccel cuda
+    and forces the hwaccel output format to nv12 (which NVENC requires) before the input file.
+    Then extra_args are applied.
     
     This results in a command of the form:
-      ffmpeg -y -hwaccel cuda -hwaccel_output_format cuda -c:v h264_cuvid -i input_file <extra_args> output_file
+      ffmpeg -y -hwaccel cuda -hwaccel_output_format nv12 -i input_file <extra_args> output_file
     
     Otherwise, a default conversion is applied (re-encoding with libx264).
     
@@ -117,9 +118,7 @@ async def convert_file(input_file: str, output_file: str, extra_args: list = Non
     if extra_args is None:
         extra_args = ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
     if use_gpu:
-        # Insert GPU decoding flags before the input file.
-        gpu_flags = ["-hwaccel", "cuda", "-hwaccel_output_format",
-                     "cuda", "-c:v", "h264_cuvid"]
+        gpu_flags = ["-hwaccel", "cuda", "-hwaccel_output_format", "nv12"]
         args = ["-y"] + gpu_flags + ["-i", input_file] + \
             extra_args + [output_file]
     else:
@@ -141,16 +140,14 @@ async def convert_file(input_file: str, output_file: str, extra_args: list = Non
     print(f"Conversion completed: {output_file}")
     return log
 
-
 # For quick manual testing from the command line.
 if __name__ == "__main__":
     async def main():
         # Replace this with an actual test video file.
         test_video = r"C:\Users\fbb92\OneDrive\Documents\Projects\Vidium\dang.webm"
-
         base = os.path.splitext(os.path.basename(test_video))[0]
 
-        # Example: Convert to GIF (by specifying video filter parameters).
+        # Example: Convert to GIF (using a filter chain for GIF creation).
         gif_output = os.path.join(OUTPUT_FOLDER, base + ".gif")
         try:
             print("Starting conversion to GIF...")
@@ -159,14 +156,18 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"Error during GIF conversion: {e}", file=sys.stderr)
 
-        # Example: Generic video conversion to MP4 (using default extra_args).
+        # Example: Generic video conversion to MP4 using GPU acceleration.
         mp4_output = os.path.join(OUTPUT_FOLDER, base + ".mp4")
         try:
             print("Starting conversion to MP4...")
-            # Example using GPU acceleration:
-            log = await convert_file(test_video, mp4_output, use_gpu=True,
-                                     extra_args=["-r", "60", "-pix_fmt", "yuv420p", "-c:v", "h264_nvenc",
-                                                 "-preset", "fast", "-crf", "23"])
+            # For GPU acceleration, we use preset fast and NVENC.
+            # If the input file is .webm, we add parallelism options.
+            gpu_extra_args = ["-r", "60", "-c:v",
+                              "h264_nvenc", "-preset", "fast"]
+            if test_video.lower().endswith(".webm"):
+                gpu_extra_args += ["-tile-columns",
+                                   "6", "-frame-parallel", "1"]
+            log = await convert_file(test_video, mp4_output, use_gpu=True, extra_args=gpu_extra_args)
             print(log)
         except Exception as e:
             print(f"Error during MP4 conversion: {e}", file=sys.stderr)

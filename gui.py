@@ -4,7 +4,7 @@ import asyncio
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLineEdit, QFileDialog, QLabel, QMenu, QComboBox, QPlainTextEdit,
-    QCheckBox, QSlider, QListWidget, QSizePolicy, QProgressBar, QGroupBox, QStyle
+    QCheckBox, QSlider, QListWidget, QSizePolicy, QProgressBar, QGroupBox, QStyle, QTabWidget
 )
 from PySide6.QtGui import QStandardItemModel, QStandardItem, QFont, QTextOption, QPainter
 from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer, QSettings, QPoint, QUrl, QSize
@@ -13,9 +13,8 @@ from converter import convert_file, OUTPUT_FOLDER, get_input_bitrate, run_ffmpeg
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
 
+
 # --- Custom QListWidget with placeholder text when empty ---
-
-
 class PlaceholderListWidget(QListWidget):
     def __init__(self, placeholder, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -47,8 +46,7 @@ def convert_file_with_full_args(args: list) -> str:
             log += f"[stderr]\n{stderr.decode()}\n"
         if process.returncode != 0:
             raise RuntimeError(
-                f"Command failed with code {process.returncode}. Log: {log}"
-            )
+                f"Command failed with code {process.returncode}. Log: {log}")
         return log
     return asyncio.run(run_cmd())
 
@@ -102,8 +100,7 @@ class ConversionWorker(QThread):
                 log += f"[stderr]\n{stderr.decode()}\n"
             if process.returncode != 0:
                 raise RuntimeError(
-                    f"Conversion failed for {self.input_file} (return code {process.returncode}). Log: {log}"
-                )
+                    f"Conversion failed for {self.input_file} (return code {process.returncode}). Log: {log}")
             return log
 
     async def do_conversion(self):
@@ -188,8 +185,7 @@ class ConversionWorker(QThread):
             asyncio.set_event_loop(loop)
             log = loop.run_until_complete(self.do_conversion())
             self.conversionFinished.emit(
-                self.output_file, "Conversion completed successfully."
-            )
+                self.output_file, "Conversion completed successfully.")
             self.logMessage.emit(log)
         except asyncio.CancelledError as ce:
             self.conversionError.emit("Conversion stopped by user.")
@@ -217,6 +213,15 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(main_widget)
         main_layout = QVBoxLayout(main_widget)
 
+        # Create QTabWidget to hold the "Convert" and "Download" tabs
+        self.tab_widget = QTabWidget()
+
+        # ------------------------
+        # Create the "Convert" Tab
+        # ------------------------
+        self.convert_tab = QWidget()
+        convert_layout = QVBoxLayout(self.convert_tab)
+
         # --- Top Area: Input Files and Preview side-by-side ---
         top_layout = QHBoxLayout()
         input_group = QGroupBox("Add input file(s)")
@@ -232,6 +237,8 @@ class MainWindow(QMainWindow):
         self.input_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.input_list.customContextMenuRequested.connect(
             self.input_list_context_menu)
+        # Restore the connection for preview updates when the current item changes
+        self.input_list.currentItemChanged.connect(self.preview_selected_video)
         input_layout.addWidget(self.input_list)
         self.input_browse_button = QPushButton("Browse")
         self.input_browse_button.setFixedWidth(87)
@@ -248,6 +255,8 @@ class MainWindow(QMainWindow):
         preview_layout.addWidget(self.video_widget)
         self.media_player = QMediaPlayer()
         self.audio_output = QAudioOutput()
+        # Set default volume to 50%
+        self.audio_output.setVolume(0.5)
         self.media_player.setAudioOutput(self.audio_output)
         self.media_player.setVideoOutput(self.video_widget)
         self.media_player.pause()  # Paused by default
@@ -270,17 +279,15 @@ class MainWindow(QMainWindow):
         video_controls_layout.addWidget(self.toggle_button)
         self.volume_slider = QSlider(Qt.Horizontal)
         self.volume_slider.setRange(0, 100)
-        self.volume_slider.setValue(100)
+        # Set default volume slider value to 50 (50% volume)
+        self.volume_slider.setValue(50)
         self.volume_slider.setFixedWidth(100)
         self.volume_slider.valueChanged.connect(
             lambda val: self.audio_output.setVolume(val/100.0))
         video_controls_layout.addWidget(self.volume_slider)
         preview_layout.addLayout(video_controls_layout)
         top_layout.addWidget(preview_group)
-        main_layout.addLayout(top_layout)
-
-        # Connect input list selection to preview update
-        self.input_list.currentItemChanged.connect(self.preview_selected_video)
+        convert_layout.addLayout(top_layout)
 
         # --- Output Folder Area ---
         out_addr_layout = QHBoxLayout()
@@ -297,7 +304,7 @@ class MainWindow(QMainWindow):
         self.output_folder_edit.setText(default_folder)
         self.output_folder_edit.setFixedWidth(300)
         out_addr_layout.addWidget(self.output_folder_edit)
-        main_layout.addLayout(out_addr_layout)
+        convert_layout.addLayout(out_addr_layout)
 
         # --- Buttons below the address bar ---
         out_buttons_layout = QHBoxLayout()
@@ -312,7 +319,7 @@ class MainWindow(QMainWindow):
         self.default_checkbox.setChecked(default_checked)
         out_buttons_layout.addWidget(self.default_checkbox)
         out_buttons_layout.addStretch()
-        main_layout.addLayout(out_buttons_layout)
+        convert_layout.addLayout(out_buttons_layout)
         self.output_browse_button.clicked.connect(self.browse_output_folder)
         self.goto_folder_button.clicked.connect(self.goto_output_folder)
         self.default_checkbox.stateChanged.connect(
@@ -330,7 +337,7 @@ class MainWindow(QMainWindow):
         self.output_format_combo = QComboBox()
         self.populate_output_format_combo()
         format_layout.addWidget(self.output_format_combo)
-        main_layout.addLayout(format_layout)
+        convert_layout.addLayout(format_layout)
 
         # --- Options: GPU and Quality ---
         options_layout = QVBoxLayout()
@@ -358,7 +365,7 @@ class MainWindow(QMainWindow):
             QSizePolicy.Fixed, QSizePolicy.Fixed)
         quality_layout.addWidget(self.quality_value_label)
         options_layout.addLayout(quality_layout)
-        main_layout.addLayout(options_layout)
+        convert_layout.addLayout(options_layout)
 
         # --- Convert and Stop Buttons ---
         button_layout = QHBoxLayout()
@@ -379,28 +386,44 @@ class MainWindow(QMainWindow):
         self.stop_button.clicked.connect(self.stop_conversion)
         self.stop_button.setEnabled(False)
         button_layout.addWidget(self.stop_button)
-        main_layout.addLayout(button_layout)
+        convert_layout.addLayout(button_layout)
         self.convert_button.clicked.connect(self.start_conversion_queue)
 
         # --- Progress Section ---
         self.current_progress_label = QLabel("Current File Progress: 0%")
-        main_layout.addWidget(self.current_progress_label)
+        convert_layout.addWidget(self.current_progress_label)
         self.current_progress_bar = QProgressBar()
         self.current_progress_bar.setMinimum(0)
         self.current_progress_bar.setMaximum(100)
         self.current_progress_bar.setValue(0)
         self.current_progress_bar.setFixedWidth(203)
-        main_layout.addWidget(self.current_progress_bar)
+        convert_layout.addWidget(self.current_progress_bar)
         self.overall_progress_label = QLabel("Overall Progress: 0%")
-        main_layout.addWidget(self.overall_progress_label)
+        convert_layout.addWidget(self.overall_progress_label)
         self.overall_progress_bar = QProgressBar()
         self.overall_progress_bar.setMinimum(0)
         self.overall_progress_bar.setMaximum(100)
         self.overall_progress_bar.setValue(0)
         self.overall_progress_bar.setFixedWidth(203)
-        main_layout.addWidget(self.overall_progress_bar)
+        convert_layout.addWidget(self.overall_progress_bar)
 
-        # --- Console Log ---
+        # Add the "Convert" tab to the tab widget
+        self.tab_widget.addTab(self.convert_tab, "Convert")
+
+        # -------------------------
+        # Create the "Download" Tab
+        # -------------------------
+        self.download_tab = QWidget()
+        download_layout = QVBoxLayout(self.download_tab)
+        download_placeholder = QLabel("Download functionality coming soon...")
+        download_placeholder.setAlignment(Qt.AlignCenter)
+        download_layout.addWidget(download_placeholder)
+        self.tab_widget.addTab(self.download_tab, "Download")
+
+        # Add the QTabWidget to the main layout
+        main_layout.addWidget(self.tab_widget)
+
+        # --- Console Log (remains consistent across tabs) ---
         self.log_text_edit = QPlainTextEdit()
         self.log_text_edit.setReadOnly(True)
         self.log_text_edit.setPlaceholderText(
@@ -408,11 +431,6 @@ class MainWindow(QMainWindow):
         self.log_text_edit.setLineWrapMode(QPlainTextEdit.WidgetWidth)
         self.log_text_edit.setFixedHeight(150)
         self.log_text_edit.setFixedWidth(406)
-        self.log_text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        text_option = QTextOption()
-        text_option.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
-        self.log_text_edit.document().setDefaultTextOption(text_option)
-        self.log_text_edit.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         main_layout.addWidget(self.log_text_edit)
 
         # --- Conversion Queue and Progress Simulation ---
@@ -477,7 +495,6 @@ class MainWindow(QMainWindow):
                     self.input_list.addItem(f)
             if self.input_list.currentItem() is None and self.input_list.count() > 0:
                 self.input_list.setCurrentRow(0)
-        # (No extra code is needed here because the placeholder will show automatically when the list is empty.)
 
     def input_list_context_menu(self, point: QPoint):
         item = self.input_list.itemAt(point)
@@ -491,7 +508,8 @@ class MainWindow(QMainWindow):
 
     def browse_output_folder(self):
         folder = QFileDialog.getExistingDirectory(
-            self, "Select Output Folder", OUTPUT_FOLDER)
+            self, "Select Output Folder", OUTPUT_FOLDER
+        )
         if folder:
             self.output_folder_edit.setText(folder)
             self.default_checkbox.setChecked(False)
@@ -620,7 +638,6 @@ class MainWindow(QMainWindow):
         self.current_file_progress = 100
         self.current_progress_bar.setValue(self.current_file_progress)
         self.append_log(f"{output_file}: {message}")
-        # Remove the converted file from the input list
         if self.input_list.count() > 0:
             self.input_list.takeItem(0)
         self.current_index += 1
@@ -637,7 +654,6 @@ class MainWindow(QMainWindow):
     def file_conversion_error(self, error_message):
         self.file_timer.stop()
         self.append_log(f"Error: {error_message}")
-        # Remove the errored file from the input list
         if self.input_list.count() > 0:
             self.input_list.takeItem(0)
         self.current_index += 1
@@ -689,6 +705,9 @@ class MainWindow(QMainWindow):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
             self.hide_drop_overlay()
+            # If the user drops files while on a non-Convert tab, switch to Convert
+            if self.tab_widget.currentIndex() != 0:
+                self.tab_widget.setCurrentIndex(0)
             urls = event.mimeData().urls()
             for url in urls:
                 file_path = url.toLocalFile()

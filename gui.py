@@ -4,10 +4,10 @@ import asyncio
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLineEdit, QFileDialog, QLabel, QMenu, QComboBox, QPlainTextEdit,
-    QCheckBox, QSlider, QListWidget, QSizePolicy, QProgressBar, QGroupBox, QStyle, QTabWidget
+    QCheckBox, QSlider, QListWidget, QSizePolicy, QProgressBar, QGroupBox, QStyle, QTabWidget, QStatusBar
 )
 from PySide6.QtGui import QStandardItemModel, QStandardItem, QFont, QTextOption, QPainter
-from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer, QSettings, QPoint, QUrl, QSize
+from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer, QSettings, QPoint, QUrl, QSize, QEvent
 from converter import convert_file, OUTPUT_FOLDER, get_input_bitrate, run_ffmpeg, get_ffmpeg_path
 # Imports for video preview
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
@@ -66,7 +66,6 @@ class ConversionWorker(QThread):
         self._stop_event = None  # Will be created in run()
 
     def stop(self):
-        # Method to stop the conversion process
         if self._stop_event:
             self._stop_event.set()
 
@@ -105,7 +104,7 @@ class ConversionWorker(QThread):
 
     async def do_conversion(self):
         import os
-        from converter import run_ffmpeg  # ensure using updated run_ffmpeg
+        from converter import run_ffmpeg
         ext = os.path.splitext(self.output_file)[1].lower()
         log = ""
         if ext == '.gif':
@@ -161,8 +160,8 @@ class ConversionWorker(QThread):
                     base_extra_args += ["-tile-columns",
                                         "6", "-frame-parallel", "1"]
                 if bitrate_arg:
-                    base_extra_args += ["-b:v", bitrate_arg, "-maxrate",
-                                        bitrate_arg, "-bufsize", f"{(target_bitrate_k * 2)}k"]
+                    base_extra_args += ["-b:v", bitrate_arg, "-maxrate", bitrate_arg,
+                                        "-bufsize", f"{(target_bitrate_k * 2)}k"]
             else:
                 if bitrate_arg:
                     base_extra_args += ["-b:v", bitrate_arg]
@@ -180,9 +179,9 @@ class ConversionWorker(QThread):
     def run(self):
         import asyncio
         self._stop_event = asyncio.Event()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
             log = loop.run_until_complete(self.do_conversion())
             self.conversionFinished.emit(
                 self.output_file, "Conversion completed successfully.")
@@ -193,6 +192,8 @@ class ConversionWorker(QThread):
         except Exception as e:
             self.conversionError.emit(str(e))
             self.logMessage.emit(str(e))
+        finally:
+            loop.close()
 
 
 class MainWindow(QMainWindow):
@@ -200,33 +201,39 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Vidium Video Converter")
         self.resize(800, 600)
+        self.setStatusBar(QStatusBar())
         self.current_index = 0
         self.overall_progress = 0.0
         self.settings = QSettings("MyCompany", "VidiumConverter")
         self.conversion_aborted = False
+        self.conversion_active = False  # Flag indicating conversion in progress
+        self.worker = None
         self.initUI()
         self.setAcceptDrops(True)
         self.init_drop_overlay()
+        # Install event filter on video widget to block its mouse events when conversion is active
+        self.video_widget.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if obj == self.video_widget and self.conversion_active:
+            if event.type() in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease, QEvent.MouseButtonDblClick):
+                return True
+        return super().eventFilter(obj, event)
 
     def initUI(self):
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         main_layout = QVBoxLayout(main_widget)
 
-        # Create QTabWidget to hold the "Convert" and "Download" tabs
         self.tab_widget = QTabWidget()
 
-        # ------------------------
-        # Create the "Convert" Tab
-        # ------------------------
         self.convert_tab = QWidget()
         convert_layout = QVBoxLayout(self.convert_tab)
 
-        # --- Top Area: Input Files and Preview side-by-side ---
+        # Top area: input files and preview
         top_layout = QHBoxLayout()
         input_group = QGroupBox("Add input file(s)")
         input_layout = QVBoxLayout(input_group)
-        # Use our custom list widget with placeholder text
         self.input_list = PlaceholderListWidget(
             "Add, or Drag and Drop in Files")
         self.input_list.setMinimumHeight(200)
@@ -237,7 +244,7 @@ class MainWindow(QMainWindow):
         self.input_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.input_list.customContextMenuRequested.connect(
             self.input_list_context_menu)
-        # Restore the connection for preview updates when the current item changes
+        # If conversion is active, ignore selection changes.
         self.input_list.currentItemChanged.connect(self.preview_selected_video)
         input_layout.addWidget(self.input_list)
         self.input_browse_button = QPushButton("Browse")
@@ -248,26 +255,20 @@ class MainWindow(QMainWindow):
 
         preview_group = QGroupBox("Preview")
         preview_layout = QVBoxLayout(preview_group)
-        preview_group.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Expanding)
-        # Video player setup
         self.video_widget = QVideoWidget()
         preview_layout.addWidget(self.video_widget)
         self.media_player = QMediaPlayer()
         self.audio_output = QAudioOutput()
-        # Set default volume to 50%
         self.audio_output.setVolume(0.5)
         self.media_player.setAudioOutput(self.audio_output)
         self.media_player.setVideoOutput(self.video_widget)
-        self.media_player.pause()  # Paused by default
-        # Slider for video progress
+        self.media_player.pause()
         self.video_slider = QSlider(Qt.Horizontal)
         preview_layout.addWidget(self.video_slider)
         self.media_player.positionChanged.connect(self.video_slider.setValue)
         self.media_player.durationChanged.connect(
             lambda d: self.video_slider.setRange(0, d))
         self.video_slider.sliderMoved.connect(self.media_player.setPosition)
-        # --- Video Control: Toggle Play/Pause Button and Volume Slider ---
         video_controls_layout = QHBoxLayout()
         self.toggle_button = QPushButton()
         self.toggle_button.setFixedSize(40, 40)
@@ -279,7 +280,6 @@ class MainWindow(QMainWindow):
         video_controls_layout.addWidget(self.toggle_button)
         self.volume_slider = QSlider(Qt.Horizontal)
         self.volume_slider.setRange(0, 100)
-        # Set default volume slider value to 50 (50% volume)
         self.volume_slider.setValue(50)
         self.volume_slider.setFixedWidth(100)
         self.volume_slider.valueChanged.connect(
@@ -289,7 +289,7 @@ class MainWindow(QMainWindow):
         top_layout.addWidget(preview_group)
         convert_layout.addLayout(top_layout)
 
-        # --- Output Folder Area ---
+        # Output Folder area
         out_addr_layout = QHBoxLayout()
         out_addr_layout.setSpacing(0)
         out_addr_layout.setContentsMargins(0, 0, 0, 0)
@@ -306,7 +306,7 @@ class MainWindow(QMainWindow):
         out_addr_layout.addWidget(self.output_folder_edit)
         convert_layout.addLayout(out_addr_layout)
 
-        # --- Buttons below the address bar ---
+        # Buttons below folder
         out_buttons_layout = QHBoxLayout()
         out_buttons_layout.setAlignment(Qt.AlignLeft)
         self.output_browse_button = QPushButton("Browse")
@@ -325,7 +325,7 @@ class MainWindow(QMainWindow):
         self.default_checkbox.stateChanged.connect(
             self.default_checkbox_changed)
 
-        # --- Output Format Dropdown ---
+        # Output Format Dropdown
         format_layout = QHBoxLayout()
         format_layout.setSpacing(0)
         format_layout.setContentsMargins(0, 0, 0, 0)
@@ -339,7 +339,7 @@ class MainWindow(QMainWindow):
         format_layout.addWidget(self.output_format_combo)
         convert_layout.addLayout(format_layout)
 
-        # --- Options: GPU and Quality ---
+        # Options: GPU and Quality
         options_layout = QVBoxLayout()
         self.gpu_checkbox = QCheckBox("Use GPU (Very Fast)")
         options_layout.addWidget(self.gpu_checkbox)
@@ -367,7 +367,7 @@ class MainWindow(QMainWindow):
         options_layout.addLayout(quality_layout)
         convert_layout.addLayout(options_layout)
 
-        # --- Convert and Stop Buttons ---
+        # Convert and Stop Buttons
         button_layout = QHBoxLayout()
         button_layout.setContentsMargins(0, 0, 0, 0)
         button_layout.setSpacing(0)
@@ -389,7 +389,7 @@ class MainWindow(QMainWindow):
         convert_layout.addLayout(button_layout)
         self.convert_button.clicked.connect(self.start_conversion_queue)
 
-        # --- Progress Section ---
+        # Progress Section
         self.current_progress_label = QLabel("Current File Progress: 0%")
         convert_layout.addWidget(self.current_progress_label)
         self.current_progress_bar = QProgressBar()
@@ -407,12 +407,9 @@ class MainWindow(QMainWindow):
         self.overall_progress_bar.setFixedWidth(203)
         convert_layout.addWidget(self.overall_progress_bar)
 
-        # Add the "Convert" tab to the tab widget
         self.tab_widget.addTab(self.convert_tab, "Convert")
 
-        # -------------------------
-        # Create the "Download" Tab
-        # -------------------------
+        # Download Tab
         self.download_tab = QWidget()
         download_layout = QVBoxLayout(self.download_tab)
         download_placeholder = QLabel("Download functionality coming soon...")
@@ -420,10 +417,9 @@ class MainWindow(QMainWindow):
         download_layout.addWidget(download_placeholder)
         self.tab_widget.addTab(self.download_tab, "Download")
 
-        # Add the QTabWidget to the main layout
         main_layout.addWidget(self.tab_widget)
 
-        # --- Console Log (remains consistent across tabs) ---
+        # Console Log
         self.log_text_edit = QPlainTextEdit()
         self.log_text_edit.setReadOnly(True)
         self.log_text_edit.setPlaceholderText(
@@ -433,7 +429,7 @@ class MainWindow(QMainWindow):
         self.log_text_edit.setFixedWidth(406)
         main_layout.addWidget(self.log_text_edit)
 
-        # --- Conversion Queue and Progress Simulation ---
+        # Conversion Queue and Progress Simulation
         self.conversion_queue = []
         self.total_files = 0
         self.current_index = 0
@@ -503,8 +499,7 @@ class MainWindow(QMainWindow):
             remove_action = menu.addAction("Remove")
             action = menu.exec(self.input_list.mapToGlobal(point))
             if action == remove_action:
-                row = self.input_list.row(item)
-                self.input_list.takeItem(row)
+                self.input_list.takeItem(self.input_list.row(item))
 
     def browse_output_folder(self):
         folder = QFileDialog.getExistingDirectory(
@@ -521,7 +516,7 @@ class MainWindow(QMainWindow):
         if folder and os.path.isdir(folder):
             os.startfile(folder)
         else:
-            self.status_label.setText("Output folder not found.")
+            self.statusBar().showMessage("Output folder not found.")
 
     def default_checkbox_changed(self, state):
         if state == Qt.Checked:
@@ -534,6 +529,8 @@ class MainWindow(QMainWindow):
             self.settings.setValue("default_checked", False)
 
     def preview_selected_video(self, current, previous):
+        if self.conversion_active:
+            return
         if current:
             file_path = current.text()
             self.media_player.setSource(QUrl.fromLocalFile(file_path))
@@ -541,6 +538,8 @@ class MainWindow(QMainWindow):
             self.toggle_button.setIcon(self.play_icon)
 
     def toggle_play_pause(self):
+        if self.conversion_active:
+            return
         if self.media_player.playbackState() == QMediaPlayer.PlayingState:
             self.media_player.pause()
             self.toggle_button.setIcon(self.play_icon)
@@ -548,18 +547,36 @@ class MainWindow(QMainWindow):
             self.media_player.play()
             self.toggle_button.setIcon(self.pause_icon)
 
+    def disable_preview(self):
+        self.media_player.pause()
+        self.video_widget.setEnabled(False)
+        self.toggle_button.setEnabled(False)
+        self.volume_slider.setEnabled(False)
+        self.input_list.setEnabled(False)
+        self.conversion_active = True
+
+    def enable_preview(self):
+        self.video_widget.setEnabled(True)
+        self.toggle_button.setEnabled(True)
+        self.volume_slider.setEnabled(True)
+        self.input_list.setEnabled(True)
+        self.conversion_active = False
+
     def start_conversion_queue(self):
+        if self.conversion_active:
+            return
         count = self.input_list.count()
         if count == 0:
-            self.status_label.setText("No input files selected.")
+            self.statusBar().showMessage("No input files selected.")
             return
         if self.default_checkbox.isChecked():
             out_folder = OUTPUT_FOLDER
         else:
             out_folder = self.output_folder_edit.text().strip()
             if not out_folder:
-                self.status_label.setText("Please select an output folder.")
+                self.statusBar().showMessage("Please select an output folder.")
                 return
+        self.disable_preview()
         out_format = self.get_selected_format()
         self.conversion_queue = []
         for i in range(count):
@@ -599,6 +616,7 @@ class MainWindow(QMainWindow):
         if self.conversion_aborted:
             self.convert_button.setEnabled(True)
             self.stop_button.setEnabled(False)
+            self.enable_preview()
             return
         if self.current_index < self.total_files:
             input_file, output_file = self.conversion_queue[self.current_index]
@@ -608,6 +626,10 @@ class MainWindow(QMainWindow):
                 extra_args = ["-vf", "fps=10,scale=320:-1:flags=lanczos"]
             self.worker = ConversionWorker(
                 input_file, output_file, extra_args, self.gpu_checkbox.isChecked(), self.quality_slider.value())
+            # Set the parent so the thread is owned by the MainWindow
+            self.worker.setParent(self)
+            # Connect finished signal to simply clear our worker reference.
+            self.worker.finished.connect(lambda: setattr(self, "worker", None))
             self.worker.conversionFinished.connect(
                 self.file_conversion_finished)
             self.worker.conversionError.connect(self.file_conversion_error)
@@ -621,6 +643,7 @@ class MainWindow(QMainWindow):
             self.progress_label_update()
             self.convert_button.setEnabled(True)
             self.stop_button.setEnabled(False)
+            self.enable_preview()
 
     def update_current_progress(self):
         if self.current_file_progress < 100:
@@ -647,6 +670,7 @@ class MainWindow(QMainWindow):
             self.convert_button.setEnabled(True)
             self.stop_button.setEnabled(False)
             self.append_log("Conversion aborted.")
+            self.enable_preview()
         else:
             self.start_next_conversion()
 
@@ -663,6 +687,7 @@ class MainWindow(QMainWindow):
             self.convert_button.setEnabled(True)
             self.stop_button.setEnabled(False)
             self.append_log("Conversion aborted.")
+            self.enable_preview()
         else:
             self.start_next_conversion()
 
@@ -680,7 +705,7 @@ class MainWindow(QMainWindow):
         pass
 
     def show_about(self):
-        self.status_label.setText(
+        self.statusBar().showMessage(
             "Vidium Video Converter v1.0\nBuilt with PySide6 and bundled FFmpeg.")
 
     # --- Drag and Drop Event Handlers ---
@@ -705,7 +730,6 @@ class MainWindow(QMainWindow):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
             self.hide_drop_overlay()
-            # If the user drops files while on a non-Convert tab, switch to Convert
             if self.tab_widget.currentIndex() != 0:
                 self.tab_widget.setCurrentIndex(0)
             urls = event.mimeData().urls()
@@ -743,12 +767,20 @@ class MainWindow(QMainWindow):
             self.drop_overlay.setGeometry(self.rect())
 
     def stop_conversion(self):
-        if hasattr(self, 'worker') and self.worker.isRunning():
+        if self.worker is not None and self.worker.isRunning():
             self.conversion_aborted = True
             self.worker.stop()
+            self.worker.wait()  # Wait for the worker to finish.
             self.append_log("Stop requested. Conversion will be aborted.")
             self.convert_button.setEnabled(True)
             self.stop_button.setEnabled(False)
+            self.enable_preview()
+
+    def closeEvent(self, event):
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.stop()
+            self.worker.wait()
+        event.accept()
 
 
 if __name__ == "__main__":

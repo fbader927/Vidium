@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QStandardItemModel, QStandardItem, QFont, QTextOption, QPainter
 from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer, QSettings, QPoint, QUrl, QSize, QEvent
 from converter import convert_file, OUTPUT_FOLDER, get_input_bitrate, run_ffmpeg, get_ffmpeg_path
+from downloader import DownloadWorker  # Import the downloader functionality
 # Imports for video preview
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -64,10 +65,12 @@ class ConversionWorker(QThread):
         self.use_gpu = use_gpu
         self.quality = quality
         self._stop_event = None  # Will be created in run()
+        self._loop = None        # Will hold the worker's asyncio loop
 
     def stop(self):
-        if self._stop_event:
-            self._stop_event.set()
+        # Use the worker's event loop to safely set the stop event from another thread.
+        if self._stop_event and self._loop:
+            self._loop.call_soon_threadsafe(self._stop_event.set)
 
     async def run_command_with_args(self, args: list) -> str:
         ffmpeg_path = get_ffmpeg_path()
@@ -180,6 +183,8 @@ class ConversionWorker(QThread):
         import asyncio
         self._stop_event = asyncio.Event()
         loop = asyncio.new_event_loop()
+        # Assign the new loop to self._loop so stop() can call it safely
+        self._loop = loop
         asyncio.set_event_loop(loop)
         try:
             log = loop.run_until_complete(self.do_conversion())
@@ -208,6 +213,7 @@ class MainWindow(QMainWindow):
         self.conversion_aborted = False
         self.conversion_active = False  # Flag indicating conversion in progress
         self.worker = None
+        self.download_worker = None  # For download functionality
         self.initUI()
         self.setAcceptDrops(True)
         self.init_drop_overlay()
@@ -412,9 +418,52 @@ class MainWindow(QMainWindow):
         # Download Tab
         self.download_tab = QWidget()
         download_layout = QVBoxLayout(self.download_tab)
-        download_placeholder = QLabel("Download functionality coming soon...")
-        download_placeholder.setAlignment(Qt.AlignCenter)
-        download_layout.addWidget(download_placeholder)
+
+        # YouTube URL
+        youtube_url_layout = QHBoxLayout()
+        youtube_url_label = QLabel("YouTube URL:")
+        youtube_url_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.youtube_url_edit = QLineEdit()
+        self.youtube_url_edit.setPlaceholderText("Enter YouTube URL here...")
+        youtube_url_layout.addWidget(youtube_url_label)
+        youtube_url_layout.addWidget(self.youtube_url_edit)
+        download_layout.addLayout(youtube_url_layout)
+
+        # Download Folder
+        download_folder_layout = QHBoxLayout()
+        download_folder_label = QLabel("Download Folder:")
+        download_folder_label.setSizePolicy(
+            QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.download_folder_edit = QLineEdit()
+        DEFAULT_DOWNLOAD_FOLDER = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "Downloads")
+        default_download_folder = self.settings.value(
+            "default_download_folder", DEFAULT_DOWNLOAD_FOLDER)
+        self.download_folder_edit.setText(default_download_folder)
+        self.download_folder_edit.setFixedWidth(300)
+        download_folder_layout.addWidget(download_folder_label)
+        download_folder_layout.addWidget(self.download_folder_edit)
+        download_layout.addLayout(download_folder_layout)
+
+        # Browse and Default for Download Folder
+        download_folder_buttons_layout = QHBoxLayout()
+        self.download_browse_button = QPushButton("Browse")
+        self.download_default_checkbox = QCheckBox("Default")
+        default_download_checked = self.settings.value(
+            "default_download_checked", True, type=bool)
+        self.download_default_checkbox.setChecked(default_download_checked)
+        download_folder_buttons_layout.addWidget(self.download_browse_button)
+        download_folder_buttons_layout.addWidget(
+            self.download_default_checkbox)
+        download_folder_buttons_layout.addStretch()
+        download_layout.addLayout(download_folder_buttons_layout)
+
+        # Download Button
+        self.download_button = QPushButton("Download")
+        self.download_button.setFixedSize(120, 60)
+        download_layout.addWidget(
+            self.download_button, alignment=Qt.AlignCenter)
+
         self.tab_widget.addTab(self.download_tab, "Download")
 
         main_layout.addWidget(self.tab_widget)
@@ -436,6 +485,13 @@ class MainWindow(QMainWindow):
         self.file_timer = QTimer(self)
         self.file_timer.timeout.connect(self.update_current_progress)
         self.current_file_progress = 0
+
+        # Connect download tab buttons
+        self.download_browse_button.clicked.connect(
+            self.browse_download_folder)
+        self.download_default_checkbox.stateChanged.connect(
+            self.download_default_checkbox_changed)
+        self.download_button.clicked.connect(self.start_download)
 
     def init_drop_overlay(self):
         self.drop_overlay = QWidget(self)
@@ -503,8 +559,7 @@ class MainWindow(QMainWindow):
 
     def browse_output_folder(self):
         folder = QFileDialog.getExistingDirectory(
-            self, "Select Output Folder", OUTPUT_FOLDER
-        )
+            self, "Select Output Folder", OUTPUT_FOLDER)
         if folder:
             self.output_folder_edit.setText(folder)
             self.default_checkbox.setChecked(False)
@@ -616,6 +671,7 @@ class MainWindow(QMainWindow):
         if self.conversion_aborted:
             self.convert_button.setEnabled(True)
             self.stop_button.setEnabled(False)
+            self.append_log("Conversion aborted.")
             self.enable_preview()
             return
         if self.current_index < self.total_files:
@@ -661,35 +717,37 @@ class MainWindow(QMainWindow):
         self.current_file_progress = 100
         self.current_progress_bar.setValue(self.current_file_progress)
         self.append_log(f"{output_file}: {message}")
-        if self.input_list.count() > 0:
-            self.input_list.takeItem(0)
-        self.current_index += 1
-        overall = int((self.current_index / self.total_files)*100)
-        self.overall_progress_bar.setValue(overall)
-        if self.conversion_aborted:
+        # Only remove the item if conversion was not aborted.
+        if not self.conversion_aborted:
+            if self.input_list.count() > 0:
+                self.input_list.takeItem(0)
+            self.current_index += 1
+            overall = int((self.current_index / self.total_files)*100)
+            self.overall_progress_bar.setValue(overall)
+            self.start_next_conversion()
+        else:
             self.convert_button.setEnabled(True)
             self.stop_button.setEnabled(False)
             self.append_log("Conversion aborted.")
             self.enable_preview()
-        else:
-            self.start_next_conversion()
 
     @Slot(str)
     def file_conversion_error(self, error_message):
         self.file_timer.stop()
         self.append_log(f"Error: {error_message}")
-        if self.input_list.count() > 0:
-            self.input_list.takeItem(0)
-        self.current_index += 1
-        overall = int((self.current_index / self.total_files)*100)
-        self.overall_progress_bar.setValue(overall)
-        if self.conversion_aborted:
+        # Only remove the item if conversion was not aborted.
+        if not self.conversion_aborted:
+            if self.input_list.count() > 0:
+                self.input_list.takeItem(0)
+            self.current_index += 1
+            overall = int((self.current_index / self.total_files)*100)
+            self.overall_progress_bar.setValue(overall)
+            self.start_next_conversion()
+        else:
             self.convert_button.setEnabled(True)
             self.stop_button.setEnabled(False)
             self.append_log("Conversion aborted.")
             self.enable_preview()
-        else:
-            self.start_next_conversion()
 
     @Slot(str)
     def append_log(self, text):
@@ -767,14 +825,77 @@ class MainWindow(QMainWindow):
             self.drop_overlay.setGeometry(self.rect())
 
     def stop_conversion(self):
+        # Set the abort flag and stop the current worker if running.
+        self.conversion_aborted = True
         if self.worker is not None and self.worker.isRunning():
-            self.conversion_aborted = True
             self.worker.stop()
             self.worker.wait()  # Wait for the worker to finish.
-            self.append_log("Stop requested. Conversion will be aborted.")
-            self.convert_button.setEnabled(True)
-            self.stop_button.setEnabled(False)
-            self.enable_preview()
+        # Do not clear the conversion queue or remove the current item;
+        # this way the processed video remains in the list.
+        self.convert_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self.enable_preview()
+        self.append_log("Stop requested. Conversion aborted.")
+
+    def browse_download_folder(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Download Folder", self.download_folder_edit.text().strip())
+        if folder:
+            self.download_folder_edit.setText(folder)
+            self.download_default_checkbox.setChecked(False)
+            self.settings.setValue("default_download_folder", folder)
+            self.settings.setValue("default_download_checked", False)
+
+    def download_default_checkbox_changed(self, state):
+        DEFAULT_DOWNLOAD_FOLDER = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "Downloads")
+        if state == Qt.Checked:
+            self.download_folder_edit.setText(DEFAULT_DOWNLOAD_FOLDER)
+            self.download_folder_edit.setReadOnly(True)
+            self.settings.setValue(
+                "default_download_folder", DEFAULT_DOWNLOAD_FOLDER)
+            self.settings.setValue("default_download_checked", True)
+        else:
+            self.download_folder_edit.setReadOnly(False)
+            self.settings.setValue("default_download_checked", False)
+
+    def start_download(self):
+        url = self.youtube_url_edit.text().strip()
+        if not url:
+            self.statusBar().showMessage("Please enter a YouTube URL.")
+            return
+        download_folder = self.download_folder_edit.text().strip()
+        if not download_folder:
+            self.statusBar().showMessage("Please select a download folder.")
+            return
+        self.download_button.setEnabled(False)
+        self.download_browse_button.setEnabled(False)
+        self.youtube_url_edit.setEnabled(False)
+        self.download_folder_edit.setEnabled(False)
+        self.download_default_checkbox.setEnabled(False)
+        self.append_log("Starting download...")
+        self.download_worker = DownloadWorker(url, download_folder)
+        self.download_worker.finished.connect(self.download_finished)
+        self.download_worker.error.connect(self.download_error)
+        self.download_worker.start()
+
+    @Slot(str)
+    def download_finished(self, message):
+        self.append_log(message)
+        self.download_button.setEnabled(True)
+        self.download_browse_button.setEnabled(True)
+        self.youtube_url_edit.setEnabled(True)
+        self.download_folder_edit.setEnabled(True)
+        self.download_default_checkbox.setEnabled(True)
+
+    @Slot(str)
+    def download_error(self, error_message):
+        self.append_log("Download error: " + error_message)
+        self.download_button.setEnabled(True)
+        self.download_browse_button.setEnabled(True)
+        self.youtube_url_edit.setEnabled(True)
+        self.download_folder_edit.setEnabled(True)
+        self.download_default_checkbox.setEnabled(True)
 
     def closeEvent(self, event):
         if self.worker is not None and self.worker.isRunning():

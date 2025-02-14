@@ -1,6 +1,8 @@
 import sys
 import os
 import asyncio
+import tempfile
+import subprocess
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLineEdit, QFileDialog, QLabel, QMenu, QComboBox, QPlainTextEdit,
@@ -13,6 +15,19 @@ from downloader import DownloadWorker  # Import the downloader functionality
 # Imports for video preview
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
+
+
+# --- New ClickableSlider subclass to enable seeking on click ---
+class ClickableSlider(QSlider):
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            # Calculate new slider value based on click position
+            new_value = QStyle.sliderValueFromPosition(
+                self.minimum(), self.maximum(), event.x(), self.width())
+            self.setValue(new_value)
+            self.sliderMoved.emit(new_value)
+            event.accept()
+        super().mousePressEvent(event)
 
 
 # --- Custom QListWidget with placeholder text when empty ---
@@ -50,6 +65,39 @@ def convert_file_with_full_args(args: list) -> str:
                 f"Command failed with code {process.returncode}. Log: {log}")
         return log
     return asyncio.run(run_cmd())
+
+
+# --- New worker for converting mkv to webm preview with optional GPU acceleration ---
+class PreviewConversionWorker(QThread):
+    # Emits the path of the converted preview file
+    conversionFinished = Signal(str)
+
+    def __init__(self, input_file, output_file, use_gpu=False):
+        super().__init__()
+        self.input_file = input_file
+        self.output_file = output_file
+        self.use_gpu = use_gpu
+
+    def run(self):
+        # Use FFmpeg (the bundled executable) to convert a short segment of the mkv to webm.
+        # This conversion is intended only for preview purposes (limited to 30 seconds).
+        ffmpeg_path = get_ffmpeg_path()
+        cmd = [ffmpeg_path, "-y"]
+        if self.use_gpu:
+            # Add GPU flags if GPU is enabled.
+            gpu_flags = ["-hwaccel", "cuda", "-hwaccel_output_format", "nv12"]
+            cmd.extend(gpu_flags)
+        cmd.extend([
+            "-i", self.input_file,
+            "-t", "30",  # convert only the first 30 seconds
+            "-c:v", "libvpx", "-crf", "30", "-b:v", "500k",
+            "-c:a", "libvorbis",
+            "-f", "webm",
+            self.output_file
+        ])
+        # Run the conversion and ignore output; errors will show up in the log if any.
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.conversionFinished.emit(self.output_file)
 
 
 class ConversionWorker(QThread):
@@ -214,6 +262,7 @@ class MainWindow(QMainWindow):
         self.conversion_active = False  # Flag indicating conversion in progress
         self.worker = None
         self.download_worker = None  # For download functionality
+        self.preview_conversion_worker = None  # For mkv preview conversion
         self.initUI()
         self.setAcceptDrops(True)
         self.init_drop_overlay()
@@ -269,7 +318,8 @@ class MainWindow(QMainWindow):
         self.media_player.setAudioOutput(self.audio_output)
         self.media_player.setVideoOutput(self.video_widget)
         self.media_player.pause()
-        self.video_slider = QSlider(Qt.Horizontal)
+        # Use ClickableSlider instead of QSlider for proper click-based seeking.
+        self.video_slider = ClickableSlider(Qt.Horizontal)
         preview_layout.addWidget(self.video_slider)
         self.media_player.positionChanged.connect(self.video_slider.setValue)
         self.media_player.durationChanged.connect(
@@ -588,9 +638,37 @@ class MainWindow(QMainWindow):
             return
         if current:
             file_path = current.text()
-            self.media_player.setSource(QUrl.fromLocalFile(file_path))
-            self.media_player.pause()
-            self.toggle_button.setIcon(self.play_icon)
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext == ".mkv":
+                # For mkv files, convert to a temporary webm for preview to enable proper seeking.
+                base = os.path.splitext(os.path.basename(file_path))[0]
+                temp_dir = tempfile.gettempdir()
+                preview_file = os.path.join(temp_dir, base + "_preview.webm")
+                if os.path.exists(preview_file):
+                    self.media_player.setSource(
+                        QUrl.fromLocalFile(preview_file))
+                    self.media_player.pause()
+                    self.toggle_button.setIcon(self.play_icon)
+                else:
+                    self.append_log(
+                        "Converting mkv to webm for preview, please wait...")
+                    # Pass the GPU flag based on the GPU checkbox state.
+                    self.preview_conversion_worker = PreviewConversionWorker(
+                        file_path, preview_file, self.gpu_checkbox.isChecked())
+                    self.preview_conversion_worker.conversionFinished.connect(
+                        self.on_preview_conversion_finished)
+                    self.preview_conversion_worker.start()
+            else:
+                self.media_player.setSource(QUrl.fromLocalFile(file_path))
+                self.media_player.pause()
+                self.toggle_button.setIcon(self.play_icon)
+
+    @Slot(str)
+    def on_preview_conversion_finished(self, preview_file):
+        self.append_log("Preview conversion finished.")
+        self.media_player.setSource(QUrl.fromLocalFile(preview_file))
+        self.media_player.pause()
+        self.toggle_button.setIcon(self.play_icon)
 
     def toggle_play_pause(self):
         if self.conversion_active:

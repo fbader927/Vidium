@@ -469,15 +469,15 @@ class MainWindow(QMainWindow):
         self.download_tab = QWidget()
         download_layout = QVBoxLayout(self.download_tab)
 
-        # YouTube URL
-        youtube_url_layout = QHBoxLayout()
-        youtube_url_label = QLabel("YouTube URL:")
-        youtube_url_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.youtube_url_edit = QLineEdit()
-        self.youtube_url_edit.setPlaceholderText("Enter YouTube URL here...")
-        youtube_url_layout.addWidget(youtube_url_label)
-        youtube_url_layout.addWidget(self.youtube_url_edit)
-        download_layout.addLayout(youtube_url_layout)
+        # Video URL (supports YouTube, Reddit, Twitter)
+        video_url_layout = QHBoxLayout()
+        video_url_label = QLabel("Video URL:")
+        video_url_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.video_url_edit = QLineEdit()
+        self.video_url_edit.setPlaceholderText("Enter Video URL here...")
+        video_url_layout.addWidget(video_url_label)
+        video_url_layout.addWidget(self.video_url_edit)
+        download_layout.addLayout(video_url_layout)
 
         # Download Folder
         download_folder_layout = QHBoxLayout()
@@ -503,16 +503,14 @@ class MainWindow(QMainWindow):
             "default_download_checked", True, type=bool)
         self.download_default_checkbox.setChecked(default_download_checked)
         download_folder_buttons_layout.addWidget(self.download_browse_button)
-        download_folder_buttons_layout.addWidget(
-            self.download_default_checkbox)
+        download_folder_buttons_layout.addWidget(self.download_default_checkbox)
         download_folder_buttons_layout.addStretch()
         download_layout.addLayout(download_folder_buttons_layout)
 
         # Download Button
         self.download_button = QPushButton("Download")
         self.download_button.setFixedSize(120, 60)
-        download_layout.addWidget(
-            self.download_button, alignment=Qt.AlignCenter)
+        download_layout.addWidget(self.download_button, alignment=Qt.AlignCenter)
 
         self.tab_widget.addTab(self.download_tab, "Download")
 
@@ -537,10 +535,8 @@ class MainWindow(QMainWindow):
         self.current_file_progress = 0
 
         # Connect download tab buttons
-        self.download_browse_button.clicked.connect(
-            self.browse_download_folder)
-        self.download_default_checkbox.stateChanged.connect(
-            self.download_default_checkbox_changed)
+        self.download_browse_button.clicked.connect(self.browse_download_folder)
+        self.download_default_checkbox.stateChanged.connect(self.download_default_checkbox_changed)
         self.download_button.clicked.connect(self.start_download)
 
     def init_drop_overlay(self):
@@ -930,17 +926,16 @@ class MainWindow(QMainWindow):
         if state == Qt.Checked:
             self.download_folder_edit.setText(DEFAULT_DOWNLOAD_FOLDER)
             self.download_folder_edit.setReadOnly(True)
-            self.settings.setValue(
-                "default_download_folder", DEFAULT_DOWNLOAD_FOLDER)
+            self.settings.setValue("default_download_folder", DEFAULT_DOWNLOAD_FOLDER)
             self.settings.setValue("default_download_checked", True)
         else:
             self.download_folder_edit.setReadOnly(False)
             self.settings.setValue("default_download_checked", False)
 
     def start_download(self):
-        url = self.youtube_url_edit.text().strip()
+        url = self.video_url_edit.text().strip()
         if not url:
-            self.statusBar().showMessage("Please enter a YouTube URL.")
+            self.statusBar().showMessage("Please enter a video URL.")
             return
         download_folder = self.download_folder_edit.text().strip()
         if not download_folder:
@@ -948,7 +943,7 @@ class MainWindow(QMainWindow):
             return
         self.download_button.setEnabled(False)
         self.download_browse_button.setEnabled(False)
-        self.youtube_url_edit.setEnabled(False)
+        self.video_url_edit.setEnabled(False)
         self.download_folder_edit.setEnabled(False)
         self.download_default_checkbox.setEnabled(False)
         self.append_log("Starting download...")
@@ -962,7 +957,7 @@ class MainWindow(QMainWindow):
         self.append_log(message)
         self.download_button.setEnabled(True)
         self.download_browse_button.setEnabled(True)
-        self.youtube_url_edit.setEnabled(True)
+        self.video_url_edit.setEnabled(True)
         self.download_folder_edit.setEnabled(True)
         self.download_default_checkbox.setEnabled(True)
 
@@ -971,7 +966,7 @@ class MainWindow(QMainWindow):
         self.append_log("Download error: " + error_message)
         self.download_button.setEnabled(True)
         self.download_browse_button.setEnabled(True)
-        self.youtube_url_edit.setEnabled(True)
+        self.video_url_edit.setEnabled(True)
         self.download_folder_edit.setEnabled(True)
         self.download_default_checkbox.setEnabled(True)
 

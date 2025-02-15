@@ -6,7 +6,7 @@ import subprocess
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLineEdit, QFileDialog, QLabel, QMenu, QComboBox, QPlainTextEdit,
-    QCheckBox, QSlider, QListWidget, QSizePolicy, QProgressBar, QGroupBox, QStyle, QTabWidget, QStatusBar
+    QCheckBox, QSlider, QListWidget, QListWidgetItem, QSizePolicy, QProgressBar, QGroupBox, QStyle, QTabWidget, QStatusBar
 )
 from PySide6.QtGui import QStandardItemModel, QStandardItem, QFont, QTextOption, QPainter
 from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer, QSettings, QPoint, QUrl, QSize, QEvent
@@ -285,29 +285,55 @@ class MainWindow(QMainWindow):
         self.convert_tab = QWidget()
         convert_layout = QVBoxLayout(self.convert_tab)
 
-        # Top area: input files and preview
+        # --- Top area: Files and Preview ---
         top_layout = QHBoxLayout()
-        input_group = QGroupBox("Add input file(s)")
-        input_layout = QVBoxLayout(input_group)
-        self.input_list = PlaceholderListWidget(
-            "Add, or Drag and Drop in Files")
+
+        # Files Group Box with internal Tabs (Input and Output)
+        files_group = QGroupBox("Files")
+        files_layout = QVBoxLayout(files_group)
+        self.files_tabwidget = QTabWidget()
+
+        # Input Tab (for input files)
+        input_tab = QWidget()
+        input_tab_layout = QVBoxLayout(input_tab)
+        self.input_list = PlaceholderListWidget("Add, or Drag and Drop in Files")
         self.input_list.setMinimumHeight(200)
-        self.input_list.setStyleSheet(
-            "QListWidget { margin-left: 0px; margin-right: 0px; }")
-        self.input_list.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.input_list.setStyleSheet("QListWidget { margin-left: 0px; margin-right: 0px; }")
+        self.input_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.input_list.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.input_list.customContextMenuRequested.connect(
-            self.input_list_context_menu)
-        # If conversion is active, ignore selection changes.
-        self.input_list.currentItemChanged.connect(self.preview_selected_video)
-        input_layout.addWidget(self.input_list)
+        self.input_list.customContextMenuRequested.connect(self.input_list_context_menu)
+        self.input_list.currentItemChanged.connect(self.preview_selected_file)
+        input_tab_layout.addWidget(self.input_list)
+        # Buttons for Input Tab: Browse and Clear All
+        input_buttons_layout = QHBoxLayout()
         self.input_browse_button = QPushButton("Browse")
         self.input_browse_button.setFixedWidth(87)
         self.input_browse_button.clicked.connect(self.browse_input_files)
-        input_layout.addWidget(self.input_browse_button)
-        top_layout.addWidget(input_group)
+        input_buttons_layout.addWidget(self.input_browse_button)
+        self.clear_all_button = QPushButton("Clear All")
+        self.clear_all_button.setFixedWidth(87)
+        self.clear_all_button.clicked.connect(self.clear_input_files)
+        input_buttons_layout.addWidget(self.clear_all_button)
+        input_buttons_layout.addStretch()
+        input_tab_layout.addLayout(input_buttons_layout)
+        self.files_tabwidget.addTab(input_tab, "Input")
 
+        # Output Tab (for output files)
+        output_tab = QWidget()
+        output_tab_layout = QVBoxLayout(output_tab)
+        self.output_list = PlaceholderListWidget("Output files will appear here")
+        self.output_list.setMinimumHeight(200)
+        self.output_list.setStyleSheet("QListWidget { margin-left: 0px; margin-right: 0px; }")
+        self.output_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.output_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.output_list.currentItemChanged.connect(self.preview_selected_file)
+        output_tab_layout.addWidget(self.output_list)
+        self.files_tabwidget.addTab(output_tab, "Output")
+
+        files_layout.addWidget(self.files_tabwidget)
+        top_layout.addWidget(files_group)
+
+        # Preview Group remains unchanged
         preview_group = QGroupBox("Preview")
         preview_layout = QVBoxLayout(preview_group)
         self.video_widget = QVideoWidget()
@@ -345,7 +371,7 @@ class MainWindow(QMainWindow):
         top_layout.addWidget(preview_group)
         convert_layout.addLayout(top_layout)
 
-        # Output Folder area (Convert Tab)
+        # --- Output Folder area (Convert Tab) ---
         out_addr_layout = QHBoxLayout()
         out_addr_layout.setSpacing(0)
         out_addr_layout.setContentsMargins(0, 0, 0, 0)
@@ -362,7 +388,7 @@ class MainWindow(QMainWindow):
         out_addr_layout.addWidget(self.output_folder_edit)
         convert_layout.addLayout(out_addr_layout)
 
-        # Buttons below folder (Convert Tab)
+        # --- Buttons below folder (Convert Tab) ---
         out_buttons_layout = QHBoxLayout()
         out_buttons_layout.setAlignment(Qt.AlignLeft)
         self.output_browse_button = QPushButton("Browse")
@@ -381,7 +407,7 @@ class MainWindow(QMainWindow):
         self.default_checkbox.stateChanged.connect(
             self.default_checkbox_changed)
 
-        # Output Format Dropdown
+        # --- Output Format Dropdown ---
         format_layout = QHBoxLayout()
         format_layout.setSpacing(0)
         format_layout.setContentsMargins(0, 0, 0, 0)
@@ -395,7 +421,7 @@ class MainWindow(QMainWindow):
         format_layout.addWidget(self.output_format_combo)
         convert_layout.addLayout(format_layout)
 
-        # Options: GPU and Quality
+        # --- Options: GPU and Quality ---
         options_layout = QVBoxLayout()
         self.gpu_checkbox = QCheckBox("Use GPU (Very Fast)")
         options_layout.addWidget(self.gpu_checkbox)
@@ -423,7 +449,7 @@ class MainWindow(QMainWindow):
         options_layout.addLayout(quality_layout)
         convert_layout.addLayout(options_layout)
 
-        # Convert and Stop Buttons (Convert Tab)
+        # --- Convert and Stop Buttons (Convert Tab) ---
         button_layout = QHBoxLayout()
         button_layout.setContentsMargins(0, 0, 0, 0)
         button_layout.setSpacing(0)
@@ -445,7 +471,7 @@ class MainWindow(QMainWindow):
         convert_layout.addLayout(button_layout)
         self.convert_button.clicked.connect(self.start_conversion_queue)
 
-        # Progress Section (Convert Tab)
+        # --- Progress Section (Convert Tab) ---
         self.current_progress_label = QLabel("Current File Progress: 0%")
         convert_layout.addWidget(self.current_progress_label)
         self.current_progress_bar = QProgressBar()
@@ -615,6 +641,9 @@ class MainWindow(QMainWindow):
             if action == remove_action:
                 self.input_list.takeItem(self.input_list.row(item))
 
+    def clear_input_files(self):
+        self.input_list.clear()
+
     def browse_output_folder(self):
         folder = QFileDialog.getExistingDirectory(
             self, "Select Output Folder", OUTPUT_FOLDER)
@@ -641,11 +670,12 @@ class MainWindow(QMainWindow):
             self.output_folder_edit.setReadOnly(False)
             self.settings.setValue("default_checked", False)
 
-    def preview_selected_video(self, current, previous):
+    def preview_selected_file(self, current, previous):
         if self.conversion_active:
             return
         if current:
-            file_path = current.text()
+            # If the item has user data (full path) use it; otherwise use the text.
+            file_path = current.data(Qt.UserRole) if current.data(Qt.UserRole) is not None else current.text()
             ext = os.path.splitext(file_path)[1].lower()
             if ext == ".mkv":
                 # For mkv files, convert to a temporary webm for preview to enable proper seeking.
@@ -693,14 +723,14 @@ class MainWindow(QMainWindow):
         self.video_widget.setEnabled(False)
         self.toggle_button.setEnabled(False)
         self.volume_slider.setEnabled(False)
-        self.input_list.setEnabled(False)
+        self.files_tabwidget.setEnabled(False)
         self.conversion_active = True
 
     def enable_preview(self):
         self.video_widget.setEnabled(True)
         self.toggle_button.setEnabled(True)
         self.volume_slider.setEnabled(True)
-        self.input_list.setEnabled(True)
+        self.files_tabwidget.setEnabled(True)
         self.conversion_active = False
 
     def start_conversion_queue(self):
@@ -807,6 +837,11 @@ class MainWindow(QMainWindow):
         self.current_file_progress = 100
         self.current_progress_bar.setValue(self.current_file_progress)
         self.append_log(f"{output_file}: {message}")
+        # Add output file to the Output tab list.
+        # Instead of showing the full path, only the file name is displayed.
+        item = QListWidgetItem(os.path.basename(output_file))
+        item.setData(Qt.UserRole, output_file)
+        self.output_list.addItem(item)
         # Only remove the item if conversion was not aborted.
         if not self.conversion_aborted:
             if self.input_list.count() > 0:
@@ -880,6 +915,8 @@ class MainWindow(QMainWindow):
             self.hide_drop_overlay()
             if self.tab_widget.currentIndex() != 0:
                 self.tab_widget.setCurrentIndex(0)
+            if self.files_tabwidget.currentIndex() != 0:
+                self.files_tabwidget.setCurrentIndex(0)
             urls = event.mimeData().urls()
             for url in urls:
                 file_path = url.toLocalFile()

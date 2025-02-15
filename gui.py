@@ -783,6 +783,10 @@ class MainWindow(QMainWindow):
         else:
             self.overall_progress_bar.setValue(100)
             self.progress_label_update()
+            # Reset preview pane to its original state
+            self.media_player.stop()
+            self.media_player.setSource(QUrl())
+            self.toggle_button.setIcon(self.play_icon)
             self.convert_button.setEnabled(True)
             self.stop_button.setEnabled(False)
             self.enable_preview()

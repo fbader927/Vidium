@@ -345,7 +345,7 @@ class MainWindow(QMainWindow):
         top_layout.addWidget(preview_group)
         convert_layout.addLayout(top_layout)
 
-        # Output Folder area
+        # Output Folder area (Convert Tab)
         out_addr_layout = QHBoxLayout()
         out_addr_layout.setSpacing(0)
         out_addr_layout.setContentsMargins(0, 0, 0, 0)
@@ -362,7 +362,7 @@ class MainWindow(QMainWindow):
         out_addr_layout.addWidget(self.output_folder_edit)
         convert_layout.addLayout(out_addr_layout)
 
-        # Buttons below folder
+        # Buttons below folder (Convert Tab)
         out_buttons_layout = QHBoxLayout()
         out_buttons_layout.setAlignment(Qt.AlignLeft)
         self.output_browse_button = QPushButton("Browse")
@@ -423,7 +423,7 @@ class MainWindow(QMainWindow):
         options_layout.addLayout(quality_layout)
         convert_layout.addLayout(options_layout)
 
-        # Convert and Stop Buttons
+        # Convert and Stop Buttons (Convert Tab)
         button_layout = QHBoxLayout()
         button_layout.setContentsMargins(0, 0, 0, 0)
         button_layout.setSpacing(0)
@@ -445,7 +445,7 @@ class MainWindow(QMainWindow):
         convert_layout.addLayout(button_layout)
         self.convert_button.clicked.connect(self.start_conversion_queue)
 
-        # Progress Section
+        # Progress Section (Convert Tab)
         self.current_progress_label = QLabel("Current File Progress: 0%")
         convert_layout.addWidget(self.current_progress_label)
         self.current_progress_bar = QProgressBar()
@@ -465,7 +465,7 @@ class MainWindow(QMainWindow):
 
         self.tab_widget.addTab(self.convert_tab, "Convert")
 
-        # Download Tab
+        # --- Download Tab modifications ---
         self.download_tab = QWidget()
         download_layout = QVBoxLayout(self.download_tab)
 
@@ -479,11 +479,11 @@ class MainWindow(QMainWindow):
         video_url_layout.addWidget(self.video_url_edit)
         download_layout.addLayout(video_url_layout)
 
-        # Download Folder
+        # Download Folder (left-aligned)
         download_folder_layout = QHBoxLayout()
+        download_folder_layout.setAlignment(Qt.AlignLeft)
         download_folder_label = QLabel("Download Folder:")
-        download_folder_label.setSizePolicy(
-            QSizePolicy.Fixed, QSizePolicy.Fixed)
+        download_folder_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.download_folder_edit = QLineEdit()
         DEFAULT_DOWNLOAD_FOLDER = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "Downloads")
@@ -495,14 +495,16 @@ class MainWindow(QMainWindow):
         download_folder_layout.addWidget(self.download_folder_edit)
         download_layout.addLayout(download_folder_layout)
 
-        # Browse and Default for Download Folder
+        # Browse, Go To Folder, and Default for Download Folder
         download_folder_buttons_layout = QHBoxLayout()
         self.download_browse_button = QPushButton("Browse")
+        self.download_goto_button = QPushButton("Go To Folder")  # New button
         self.download_default_checkbox = QCheckBox("Default")
         default_download_checked = self.settings.value(
             "default_download_checked", True, type=bool)
         self.download_default_checkbox.setChecked(default_download_checked)
         download_folder_buttons_layout.addWidget(self.download_browse_button)
+        download_folder_buttons_layout.addWidget(self.download_goto_button)
         download_folder_buttons_layout.addWidget(self.download_default_checkbox)
         download_folder_buttons_layout.addStretch()
         download_layout.addLayout(download_folder_buttons_layout)
@@ -511,6 +513,15 @@ class MainWindow(QMainWindow):
         self.download_button = QPushButton("Download")
         self.download_button.setFixedSize(120, 60)
         download_layout.addWidget(self.download_button, alignment=Qt.AlignCenter)
+
+        # Download Progress Label and Progress Bar
+        self.download_progress_label = QLabel("Download Progress: 0%")
+        download_layout.addWidget(self.download_progress_label)
+        self.download_progress_bar = QProgressBar()
+        self.download_progress_bar.setMinimum(0)
+        self.download_progress_bar.setMaximum(100)
+        self.download_progress_bar.setValue(0)
+        download_layout.addWidget(self.download_progress_bar)
 
         self.tab_widget.addTab(self.download_tab, "Download")
 
@@ -537,6 +548,7 @@ class MainWindow(QMainWindow):
         # Connect download tab buttons
         self.download_browse_button.clicked.connect(self.browse_download_folder)
         self.download_default_checkbox.stateChanged.connect(self.download_default_checkbox_changed)
+        self.download_goto_button.clicked.connect(self.goto_download_folder)  # New connection
         self.download_button.clicked.connect(self.start_download)
 
     def init_drop_overlay(self):
@@ -920,6 +932,13 @@ class MainWindow(QMainWindow):
             self.settings.setValue("default_download_folder", folder)
             self.settings.setValue("default_download_checked", False)
 
+    def goto_download_folder(self):
+        folder = self.download_folder_edit.text().strip()
+        if folder and os.path.isdir(folder):
+            os.startfile(folder)
+        else:
+            self.statusBar().showMessage("Download folder not found.")
+
     def download_default_checkbox_changed(self, state):
         DEFAULT_DOWNLOAD_FOLDER = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "Downloads")
@@ -946,11 +965,18 @@ class MainWindow(QMainWindow):
         self.video_url_edit.setEnabled(False)
         self.download_folder_edit.setEnabled(False)
         self.download_default_checkbox.setEnabled(False)
+        self.download_goto_button.setEnabled(False)
         self.append_log("Starting download...")
         self.download_worker = DownloadWorker(url, download_folder)
         self.download_worker.finished.connect(self.download_finished)
         self.download_worker.error.connect(self.download_error)
+        self.download_worker.progress.connect(self.update_download_progress)
         self.download_worker.start()
+
+    @Slot(int)
+    def update_download_progress(self, progress):
+        self.download_progress_label.setText(f"Download Progress: {progress}%")
+        self.download_progress_bar.setValue(progress)
 
     @Slot(str)
     def download_finished(self, message):
@@ -960,6 +986,7 @@ class MainWindow(QMainWindow):
         self.video_url_edit.setEnabled(True)
         self.download_folder_edit.setEnabled(True)
         self.download_default_checkbox.setEnabled(True)
+        self.download_goto_button.setEnabled(True)
 
     @Slot(str)
     def download_error(self, error_message):
@@ -969,6 +996,7 @@ class MainWindow(QMainWindow):
         self.video_url_edit.setEnabled(True)
         self.download_folder_edit.setEnabled(True)
         self.download_default_checkbox.setEnabled(True)
+        self.download_goto_button.setEnabled(True)
 
     def closeEvent(self, event):
         if self.worker is not None and self.worker.isRunning():

@@ -19,6 +19,7 @@ def detect_video_source(url: str) -> str:
 class DownloadWorker(QThread):
     finished = Signal(str)
     error = Signal(str)
+    progress = Signal(int)  # New signal for progress updates
 
     def __init__(self, url, output_folder):
         super().__init__()
@@ -40,6 +41,7 @@ class DownloadWorker(QThread):
                 'format': 'bestvideo+bestaudio/best',
                 'noplaylist': True,  # download only a single video, not a playlist
                 'restrictfilenames': True,  # ensure filenames contain only safe characters
+                'progress_hooks': [self.download_hook]  # add progress hook
             }
 
             # Source-specific options:
@@ -59,3 +61,13 @@ class DownloadWorker(QThread):
             self.finished.emit("Download completed successfully.")
         except Exception as e:
             self.error.emit(str(e))
+
+    def download_hook(self, d):
+        if d.get('status') == 'downloading':
+            total = d.get('total_bytes') or d.get('total_bytes_estimate')
+            downloaded = d.get('downloaded_bytes', 0)
+            if total:
+                progress_percent = int(downloaded / total * 100)
+                self.progress.emit(progress_percent)
+        elif d.get('status') == 'finished':
+            self.progress.emit(100)

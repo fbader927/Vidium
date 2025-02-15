@@ -17,9 +17,9 @@ def detect_video_source(url: str) -> str:
         return "unknown"
 
 class DownloadWorker(QThread):
-    finished = Signal(str)
+    finished = Signal(str, str)  # Emits a message and the downloaded file path
     error = Signal(str)
-    progress = Signal(int)  # New signal for progress updates
+    progress = Signal(int)  # Signal for progress updates
 
     def __init__(self, url, output_folder):
         super().__init__()
@@ -57,8 +57,10 @@ class DownloadWorker(QThread):
                 })
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([self.url])
-            self.finished.emit("Download completed successfully.")
+                # extract_info with download=True both downloads and returns the info dict
+                info = ydl.extract_info(self.url, download=True)
+                downloaded_file = ydl.prepare_filename(info)
+            self.finished.emit("Download completed successfully.", downloaded_file)
         except Exception as e:
             self.error.emit(str(e))
 

@@ -16,7 +16,6 @@ from downloader import DownloadWorker  # Import the downloader functionality
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
 
-
 # --- New ClickableSlider subclass to enable seeking on click ---
 class ClickableSlider(QSlider):
     def mousePressEvent(self, event):
@@ -28,7 +27,6 @@ class ClickableSlider(QSlider):
             self.sliderMoved.emit(new_value)
             event.accept()
         super().mousePressEvent(event)
-
 
 # --- Custom QListWidget with placeholder text when empty ---
 class PlaceholderListWidget(QListWidget):
@@ -43,7 +41,6 @@ class PlaceholderListWidget(QListWidget):
             painter.setPen(Qt.gray)
             painter.drawText(self.viewport().rect(),
                              Qt.AlignCenter, self.placeholder)
-
 
 def convert_file_with_full_args(args: list) -> str:
     import asyncio
@@ -65,7 +62,6 @@ def convert_file_with_full_args(args: list) -> str:
                 f"Command failed with code {process.returncode}. Log: {log}")
         return log
     return asyncio.run(run_cmd())
-
 
 # --- New worker for converting mkv to webm preview with optional GPU acceleration ---
 class PreviewConversionWorker(QThread):
@@ -95,10 +91,8 @@ class PreviewConversionWorker(QThread):
             "-f", "webm",
             self.output_file
         ])
-        # Run the conversion and ignore output; errors will show up in the log if any.
         subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.conversionFinished.emit(self.output_file)
-
 
 class ConversionWorker(QThread):
     conversionFinished = Signal(str, str)  # output_file, status message
@@ -116,7 +110,6 @@ class ConversionWorker(QThread):
         self._loop = None        # Will hold the worker's asyncio loop
 
     def stop(self):
-        # Use the worker's event loop to safely set the stop event from another thread.
         if self._stop_event and self._loop:
             self._loop.call_soon_threadsafe(self._stop_event.set)
 
@@ -231,7 +224,6 @@ class ConversionWorker(QThread):
         import asyncio
         self._stop_event = asyncio.Event()
         loop = asyncio.new_event_loop()
-        # Assign the new loop to self._loop so stop() can call it safely
         self._loop = loop
         asyncio.set_event_loop(loop)
         try:
@@ -248,7 +240,6 @@ class ConversionWorker(QThread):
         finally:
             loop.close()
 
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -262,11 +253,11 @@ class MainWindow(QMainWindow):
         self.conversion_active = False  # Flag indicating conversion in progress
         self.worker = None
         self.download_worker = None  # For download functionality
+        self.download_conversion_worker = None  # For converting downloaded files
         self.preview_conversion_worker = None  # For mkv preview conversion
         self.initUI()
         self.setAcceptDrops(True)
         self.init_drop_overlay()
-        # Install event filter on video widget to block its mouse events when conversion is active
         self.video_widget.installEventFilter(self)
 
     def eventFilter(self, obj, event):
@@ -344,7 +335,6 @@ class MainWindow(QMainWindow):
         self.media_player.setAudioOutput(self.audio_output)
         self.media_player.setVideoOutput(self.video_widget)
         self.media_player.pause()
-        # Use ClickableSlider instead of QSlider for proper click-based seeking.
         self.video_slider = ClickableSlider(Qt.Horizontal)
         preview_layout.addWidget(self.video_slider)
         self.media_player.positionChanged.connect(self.video_slider.setValue)
@@ -407,7 +397,7 @@ class MainWindow(QMainWindow):
         self.default_checkbox.stateChanged.connect(
             self.default_checkbox_changed)
 
-        # --- Output Format Dropdown ---
+        # --- Output Format Dropdown (Convert Tab) ---
         format_layout = QHBoxLayout()
         format_layout.setSpacing(0)
         format_layout.setContentsMargins(0, 0, 0, 0)
@@ -524,7 +514,7 @@ class MainWindow(QMainWindow):
         # Browse, Go To Folder, and Default for Download Folder
         download_folder_buttons_layout = QHBoxLayout()
         self.download_browse_button = QPushButton("Browse")
-        self.download_goto_button = QPushButton("Go To Folder")  # New button
+        self.download_goto_button = QPushButton("Go To Folder")
         self.download_default_checkbox = QCheckBox("Default")
         default_download_checked = self.settings.value(
             "default_download_checked", True, type=bool)
@@ -534,6 +524,35 @@ class MainWindow(QMainWindow):
         download_folder_buttons_layout.addWidget(self.download_default_checkbox)
         download_folder_buttons_layout.addStretch()
         download_layout.addLayout(download_folder_buttons_layout)
+
+        # --- New Download Mode Dropdown ---
+        download_mode_layout = QHBoxLayout()
+        download_mode_layout.setAlignment(Qt.AlignLeft)
+        download_mode_label = QLabel("Download Mode:")
+        download_mode_layout.addWidget(download_mode_label)
+        self.download_mode_combo = QComboBox()
+        self.download_mode_combo.addItems([
+            "Download Only", 
+            "Download & Convert", 
+            "Download & Trim", 
+            "Download & Convert & Trim"
+        ])
+        download_mode_layout.addWidget(self.download_mode_combo)
+        download_layout.addLayout(download_mode_layout)
+        self.download_mode_combo.currentIndexChanged.connect(self.download_mode_changed)
+
+        # --- New Conversion Output Format Dropdown for Download Tab ---
+        self.download_output_format_layout = QHBoxLayout()
+        self.download_output_format_layout.setAlignment(Qt.AlignLeft)
+        download_output_format_label = QLabel("Output Format:")
+        self.download_output_format_layout.addWidget(download_output_format_label)
+        self.download_output_format_combo = QComboBox()
+        self.populate_output_format_combo(self.download_output_format_combo)
+        self.download_output_format_layout.addWidget(self.download_output_format_combo)
+        download_layout.addLayout(self.download_output_format_layout)
+        # Initially hide the conversion options
+        for i in range(self.download_output_format_layout.count()):
+            self.download_output_format_layout.itemAt(i).widget().setVisible(False)
 
         # Download Button
         self.download_button = QPushButton("Download")
@@ -550,7 +569,6 @@ class MainWindow(QMainWindow):
         download_layout.addWidget(self.download_progress_bar)
 
         self.tab_widget.addTab(self.download_tab, "Download")
-
         main_layout.addWidget(self.tab_widget)
 
         # Console Log
@@ -563,7 +581,7 @@ class MainWindow(QMainWindow):
         self.log_text_edit.setFixedWidth(406)
         main_layout.addWidget(self.log_text_edit)
 
-        # Conversion Queue and Progress Simulation
+        # Conversion Queue and Progress Simulation (Convert Tab)
         self.conversion_queue = []
         self.total_files = 0
         self.current_index = 0
@@ -574,7 +592,7 @@ class MainWindow(QMainWindow):
         # Connect download tab buttons
         self.download_browse_button.clicked.connect(self.browse_download_folder)
         self.download_default_checkbox.stateChanged.connect(self.download_default_checkbox_changed)
-        self.download_goto_button.clicked.connect(self.goto_download_folder)  # New connection
+        self.download_goto_button.clicked.connect(self.goto_download_folder)
         self.download_button.clicked.connect(self.start_download)
 
     def init_drop_overlay(self):
@@ -589,7 +607,11 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(self.drop_overlay)
         layout.addWidget(self.overlay_label, alignment=Qt.AlignCenter)
 
-    def populate_output_format_combo(self):
+    def populate_output_format_combo(self, combo=None):
+        # This function populates a given QComboBox with format options similar to the Convert tab.
+        # If no combo is provided, it populates self.output_format_combo.
+        if combo is None:
+            combo = self.output_format_combo
         from PySide6.QtGui import QStandardItemModel, QStandardItem, QFont
         model = QStandardItemModel()
         bold_font = QFont()
@@ -614,8 +636,8 @@ class MainWindow(QMainWindow):
         model.appendRow(header_gif)
         item = QStandardItem("   gif")
         model.appendRow(item)
-        self.output_format_combo.setModel(model)
-        self.output_format_combo.setCurrentIndex(1)
+        combo.setModel(model)
+        combo.setCurrentIndex(1)
 
     def update_quality_label(self, value):
         self.quality_value_label.setText(f"{value}%")
@@ -674,11 +696,9 @@ class MainWindow(QMainWindow):
         if self.conversion_active:
             return
         if current:
-            # If the item has user data (full path) use it; otherwise use the text.
             file_path = current.data(Qt.UserRole) if current.data(Qt.UserRole) is not None else current.text()
             ext = os.path.splitext(file_path)[1].lower()
             if ext == ".mkv":
-                # For mkv files, convert to a temporary webm for preview to enable proper seeking.
                 base = os.path.splitext(os.path.basename(file_path))[0]
                 temp_dir = tempfile.gettempdir()
                 preview_file = os.path.join(temp_dir, base + "_preview.webm")
@@ -690,7 +710,6 @@ class MainWindow(QMainWindow):
                 else:
                     self.append_log(
                         "Converting mkv to webm for preview, please wait...")
-                    # Pass the GPU flag based on the GPU checkbox state.
                     self.preview_conversion_worker = PreviewConversionWorker(
                         file_path, preview_file, self.gpu_checkbox.isChecked())
                     self.preview_conversion_worker.conversionFinished.connect(
@@ -798,9 +817,7 @@ class MainWindow(QMainWindow):
                 extra_args = ["-vf", "fps=10,scale=320:-1:flags=lanczos"]
             self.worker = ConversionWorker(
                 input_file, output_file, extra_args, self.gpu_checkbox.isChecked(), self.quality_slider.value())
-            # Set the parent so the thread is owned by the MainWindow
             self.worker.setParent(self)
-            # Connect finished signal to simply clear our worker reference.
             self.worker.finished.connect(lambda: setattr(self, "worker", None))
             self.worker.conversionFinished.connect(
                 self.file_conversion_finished)
@@ -813,7 +830,6 @@ class MainWindow(QMainWindow):
         else:
             self.overall_progress_bar.setValue(100)
             self.progress_label_update()
-            # Reset preview pane to its original state
             self.media_player.stop()
             self.media_player.setSource(QUrl())
             self.toggle_button.setIcon(self.play_icon)
@@ -837,12 +853,9 @@ class MainWindow(QMainWindow):
         self.current_file_progress = 100
         self.current_progress_bar.setValue(self.current_file_progress)
         self.append_log(f"{output_file}: {message}")
-        # Add output file to the Output tab list.
-        # Instead of showing the full path, only the file name is displayed.
         item = QListWidgetItem(os.path.basename(output_file))
         item.setData(Qt.UserRole, output_file)
         self.output_list.addItem(item)
-        # Only remove the item if conversion was not aborted.
         if not self.conversion_aborted:
             if self.input_list.count() > 0:
                 self.input_list.takeItem(0)
@@ -860,7 +873,6 @@ class MainWindow(QMainWindow):
     def file_conversion_error(self, error_message):
         self.file_timer.stop()
         self.append_log(f"Error: {error_message}")
-        # Only remove the item if conversion was not aborted.
         if not self.conversion_aborted:
             if self.input_list.count() > 0:
                 self.input_list.takeItem(0)
@@ -952,13 +964,10 @@ class MainWindow(QMainWindow):
             self.drop_overlay.setGeometry(self.rect())
 
     def stop_conversion(self):
-        # Set the abort flag and stop the current worker if running.
         self.conversion_aborted = True
         if self.worker is not None and self.worker.isRunning():
             self.worker.stop()
-            self.worker.wait()  # Wait for the worker to finish.
-        # Do not clear the conversion queue or remove the current item;
-        # this way the processed video remains in the list.
+            self.worker.wait()
         self.convert_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.enable_preview()
@@ -992,6 +1001,13 @@ class MainWindow(QMainWindow):
             self.download_folder_edit.setReadOnly(False)
             self.settings.setValue("default_download_checked", False)
 
+    def download_mode_changed(self, index):
+        mode = self.download_mode_combo.currentText()
+        # Show the conversion output format dropdown if conversion is selected.
+        visible = mode in ["Download & Convert", "Download & Convert & Trim"]
+        for i in range(self.download_output_format_layout.count()):
+            self.download_output_format_layout.itemAt(i).widget().setVisible(visible)
+
     def start_download(self):
         url = self.video_url_edit.text().strip()
         if not url:
@@ -1019,9 +1035,57 @@ class MainWindow(QMainWindow):
         self.download_progress_label.setText(f"Download Progress: {progress}%")
         self.download_progress_bar.setValue(progress)
 
-    @Slot(str)
-    def download_finished(self, message):
+    @Slot(str, str)
+    def download_finished(self, message, downloaded_file):
         self.append_log(message)
+        # Check if the selected mode requires conversion
+        mode = self.download_mode_combo.currentText()
+        if mode in ["Download & Convert", "Download & Convert & Trim"]:
+            selected_format = self.download_output_format_combo.currentText().strip()
+            if selected_format.endswith(":"):
+                selected_format = "mp4"
+            base = os.path.splitext(downloaded_file)[0]
+            new_file = base + "." + selected_format
+            self.append_log(f"Starting conversion of downloaded file to {selected_format}...")
+            self.download_conversion_worker = ConversionWorker(
+                downloaded_file, new_file, extra_args=None, use_gpu=self.gpu_checkbox.isChecked(), quality=100)
+            self.download_conversion_worker.conversionFinished.connect(self.download_conversion_finished)
+            self.download_conversion_worker.conversionError.connect(self.download_conversion_error)
+            self.download_conversion_worker.logMessage.connect(self.append_log)
+            self.download_conversion_worker.start()
+        else:
+            self.download_button.setEnabled(True)
+            self.download_browse_button.setEnabled(True)
+            self.video_url_edit.setEnabled(True)
+            self.download_folder_edit.setEnabled(True)
+            self.download_default_checkbox.setEnabled(True)
+            self.download_goto_button.setEnabled(True)
+
+    @Slot(str, str)
+    def download_conversion_finished(self, output_file, message):
+        self.append_log(f"Download conversion finished: {message}")
+        # Delete the original downloaded file using the conversion worker's input file
+        original_file = self.download_conversion_worker.input_file
+        if os.path.exists(original_file):
+            try:
+                os.remove(original_file)
+                self.append_log(f"Removed original file: {original_file}")
+            except Exception as e:
+                self.append_log(f"Could not remove original file: {e}")
+        # Add the converted file to the Output list.
+        item = QListWidgetItem(os.path.basename(output_file))
+        item.setData(Qt.UserRole, output_file)
+        self.output_list.addItem(item)
+        self.download_button.setEnabled(True)
+        self.download_browse_button.setEnabled(True)
+        self.video_url_edit.setEnabled(True)
+        self.download_folder_edit.setEnabled(True)
+        self.download_default_checkbox.setEnabled(True)
+        self.download_goto_button.setEnabled(True)
+
+    @Slot(str)
+    def download_conversion_error(self, error_message):
+        self.append_log("Download conversion error: " + error_message)
         self.download_button.setEnabled(True)
         self.download_browse_button.setEnabled(True)
         self.video_url_edit.setEnabled(True)
@@ -1044,7 +1108,6 @@ class MainWindow(QMainWindow):
             self.worker.stop()
             self.worker.wait()
         event.accept()
-
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

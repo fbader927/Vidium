@@ -582,7 +582,7 @@ class MainWindow(QMainWindow):
         self.download_mode_combo = QComboBox()
         self.download_mode_combo.addItems(
             ["Download Only", "Download & Convert", "Download & Trim", "Download & Convert & Trim"])
-        # FIX: Connect the combo box change to update the UI for trim options.
+        # Connect the combo box change to update the UI for trim options.
         self.download_mode_combo.currentIndexChanged.connect(
             self.download_mode_changed)
         download_mode_layout.addWidget(self.download_mode_combo)
@@ -900,6 +900,8 @@ class MainWindow(QMainWindow):
             use_gpu_flag = self.gpu_checkbox.isChecked()
             if self.get_selected_format().lower() == "webm":
                 use_gpu_flag = False
+            from converter import convert_file
+            from asyncio import run
             self.worker = ConversionWorker(
                 input_file, output_file, extra_args, use_gpu_flag, self.quality_slider.value())
             self.worker.setParent(self)
@@ -942,13 +944,25 @@ class MainWindow(QMainWindow):
         item.setData(Qt.UserRole, output_file)
         mode = self.download_mode_combo.currentText()
         if mode == "Download & Convert & Trim":
-            self.append_log("Starting trimming of converted file...")
-            # Pass GPU flag to TrimWorker here:
-            self.trim_worker = TrimWorker(output_file, self.trim_start_edit.text(
-            ), self.trim_end_edit.text(), use_gpu=self.gpu_checkbox.isChecked())
-            self.trim_worker.finished.connect(self.trim_finished)
-            self.trim_worker.error.connect(self.trim_error)
-            self.trim_worker.start()
+            # In this new flow, conversion is triggered after trimming.
+            # Remove the trimmed file so that only the final converted file remains.
+            original_trimmed_file = self.download_conversion_worker.input_file
+            if os.path.exists(original_trimmed_file):
+                try:
+                    os.remove(original_trimmed_file)
+                    self.append_log(
+                        f"Removed trimmed file: {original_trimmed_file}")
+                except Exception as e:
+                    self.append_log(f"Could not remove trimmed file: {e}")
+            item = QListWidgetItem(os.path.basename(output_file))
+            item.setData(Qt.UserRole, output_file)
+            self.output_list.addItem(item)
+            self.download_button.setEnabled(True)
+            self.download_browse_button.setEnabled(True)
+            self.video_url_edit.setEnabled(True)
+            self.download_folder_edit.setEnabled(True)
+            self.download_default_checkbox.setEnabled(True)
+            self.download_goto_button.setEnabled(True)
         else:
             # Only remove original file if conversion was triggered by download conversion.
             if self.download_conversion_worker is not None:
@@ -969,8 +983,6 @@ class MainWindow(QMainWindow):
             self.download_folder_edit.setEnabled(True)
             self.download_default_checkbox.setEnabled(True)
             self.download_goto_button.setEnabled(True)
-            if self.input_list.count() > 0:
-                self.input_list.takeItem(0)
         self.current_index += 1
         overall = int((self.current_index / self.total_files)*100)
         self.overall_progress_bar.setValue(overall)
@@ -992,6 +1004,199 @@ class MainWindow(QMainWindow):
             self.stop_button.setEnabled(False)
             self.append_log("Conversion aborted.")
             self.enable_preview()
+
+    @Slot(str, str)
+    def trim_finished(self, message, trimmed_file):
+        self.append_log(message)
+        mode = self.download_mode_combo.currentText()
+        if mode == "Download & Convert & Trim":
+            selected_format = self.download_output_format_combo.currentText().strip()
+            if selected_format.endswith(":"):
+                selected_format = "mp4"
+            base = os.path.splitext(trimmed_file)[0]
+            new_file = base + "." + selected_format
+            self.append_log(
+                f"Starting conversion of trimmed file to {selected_format}...")
+            use_gpu_flag = self.gpu_checkbox.isChecked()
+            if selected_format.lower() == "webm":
+                use_gpu_flag = False
+            from converter import convert_file
+            self.download_conversion_worker = ConversionWorker(
+                trimmed_file, new_file, extra_args=None, use_gpu=use_gpu_flag, quality=100)
+            self.download_conversion_worker.conversionFinished.connect(
+                self.download_conversion_finished)
+            self.download_conversion_worker.conversionError.connect(
+                self.download_conversion_error)
+            self.download_conversion_worker.logMessage.connect(self.append_log)
+            self.download_conversion_worker.start()
+        else:
+            # For Download & Trim mode, finish process.
+            item = QListWidgetItem(os.path.basename(trimmed_file))
+            item.setData(Qt.UserRole, trimmed_file)
+            self.output_list.addItem(item)
+            self.download_button.setEnabled(True)
+            self.download_browse_button.setEnabled(True)
+            self.video_url_edit.setEnabled(True)
+            self.download_folder_edit.setEnabled(True)
+            self.download_default_checkbox.setEnabled(True)
+            self.download_goto_button.setEnabled(True)
+
+    # --- New trim_error slot to handle errors from the TrimWorker ---
+    @Slot(str)
+    def trim_error(self, error_message):
+        self.append_log("Trim error: " + error_message)
+        self.download_button.setEnabled(True)
+        self.download_browse_button.setEnabled(True)
+        self.video_url_edit.setEnabled(True)
+        self.download_folder_edit.setEnabled(True)
+        self.download_default_checkbox.setEnabled(True)
+        self.download_goto_button.setEnabled(True)
+
+    @Slot(str)
+    def download_conversion_error(self, error_message):
+        self.append_log("Download conversion error: " + error_message)
+        self.download_button.setEnabled(True)
+        self.download_browse_button.setEnabled(True)
+        self.video_url_edit.setEnabled(True)
+        self.download_folder_edit.setEnabled(True)
+        self.download_default_checkbox.setEnabled(True)
+        self.download_goto_button.setEnabled(True)
+
+    @Slot(str)
+    def download_error(self, error_message):
+        self.append_log("Download error: " + error_message)
+        self.download_button.setEnabled(True)
+        self.download_browse_button.setEnabled(True)
+        self.video_url_edit.setEnabled(True)
+        self.download_folder_edit.setEnabled(True)
+        self.download_default_checkbox.setEnabled(True)
+        self.download_goto_button.setEnabled(True)
+
+    @Slot(str, str)
+    def download_finished(self, message, downloaded_file):
+        self.append_log(message)
+        mode = self.download_mode_combo.currentText()
+        if mode == "Download & Convert":
+            selected_format = self.download_output_format_combo.currentText().strip()
+            if selected_format.endswith(":"):
+                selected_format = "mp4"
+            base = os.path.splitext(downloaded_file)[0]
+            new_file = base + "." + selected_format
+            self.append_log(
+                f"Starting conversion of downloaded file to {selected_format}...")
+            use_gpu_flag = self.gpu_checkbox.isChecked()
+            if selected_format.lower() == "webm":
+                use_gpu_flag = False
+            self.download_conversion_worker = ConversionWorker(
+                downloaded_file, new_file, extra_args=None, use_gpu=use_gpu_flag, quality=100)
+            self.download_conversion_worker.conversionFinished.connect(
+                self.download_conversion_finished)
+            self.download_conversion_worker.conversionError.connect(
+                self.download_conversion_error)
+            self.download_conversion_worker.logMessage.connect(self.append_log)
+            self.download_conversion_worker.start()
+        elif mode == "Download & Convert & Trim":
+            self.append_log(
+                "Starting trimming of downloaded file (for conversion and trimming)...")
+            self.trim_worker = TrimWorker(downloaded_file, self.trim_start_edit.text(
+            ), self.trim_end_edit.text(), use_gpu=self.gpu_checkbox.isChecked())
+            self.trim_worker.finished.connect(self.trim_finished)
+            self.trim_worker.error.connect(self.trim_error)
+            self.trim_worker.start()
+        elif mode == "Download & Trim":
+            self.append_log("Starting trimming of downloaded file...")
+            self.trim_worker = TrimWorker(downloaded_file, self.trim_start_edit.text(
+            ), self.trim_end_edit.text(), use_gpu=self.gpu_checkbox.isChecked())
+            self.trim_worker.finished.connect(self.trim_finished)
+            self.trim_worker.error.connect(self.trim_error)
+            self.trim_worker.start()
+        else:
+            self.download_button.setEnabled(True)
+            self.download_browse_button.setEnabled(True)
+            self.video_url_edit.setEnabled(True)
+            self.download_folder_edit.setEnabled(True)
+            self.download_default_checkbox.setEnabled(True)
+            self.download_goto_button.setEnabled(True)
+
+    def download_mode_changed(self, index):
+        mode = self.download_mode_combo.currentText()
+        visible_format = mode in [
+            "Download & Convert", "Download & Convert & Trim"]
+        for i in range(self.download_output_format_layout.count()):
+            self.download_output_format_layout.itemAt(
+                i).widget().setVisible(visible_format)
+        if "Trim" in mode:
+            self.trim_widget.show()
+        else:
+            self.trim_widget.hide()
+
+    def start_download(self):
+        url = self.video_url_edit.text().strip()
+        if not url:
+            self.statusBar().showMessage("Please enter a video URL.")
+            return
+        download_folder = self.download_folder_edit.text().strip()
+        if not download_folder:
+            self.statusBar().showMessage("Please select a download folder.")
+            return
+        self.download_button.setEnabled(False)
+        self.download_browse_button.setEnabled(False)
+        self.video_url_edit.setEnabled(False)
+        self.download_folder_edit.setEnabled(False)
+        self.download_default_checkbox.setEnabled(False)
+        self.download_goto_button.setEnabled(False)
+        self.append_log("Starting download...")
+        self.download_worker = DownloadWorker(url, download_folder)
+        self.download_worker.finished.connect(self.download_finished)
+        self.download_worker.error.connect(self.download_error)
+        self.download_worker.progress.connect(self.update_download_progress)
+        self.download_worker.start()
+
+    @Slot(int)
+    def update_download_progress(self, progress):
+        self.download_progress_label.setText(f"Download Progress: {progress}%")
+        self.download_progress_bar.setValue(progress)
+
+    @Slot(str, str)
+    def download_conversion_finished(self, output_file, message):
+        self.append_log(f"Download conversion finished: {message}")
+        mode = self.download_mode_combo.currentText()
+        if mode == "Download & Convert":
+            original_file = self.download_conversion_worker.input_file
+            if os.path.exists(original_file):
+                try:
+                    os.remove(original_file)
+                    self.append_log(f"Removed original file: {original_file}")
+                except Exception as e:
+                    self.append_log(f"Could not remove original file: {e}")
+            item = QListWidgetItem(os.path.basename(output_file))
+            item.setData(Qt.UserRole, output_file)
+            self.output_list.addItem(item)
+            self.download_button.setEnabled(True)
+            self.download_browse_button.setEnabled(True)
+            self.video_url_edit.setEnabled(True)
+            self.download_folder_edit.setEnabled(True)
+            self.download_default_checkbox.setEnabled(True)
+            self.download_goto_button.setEnabled(True)
+        elif mode == "Download & Convert & Trim":
+            # Remove the trimmed file (input to conversion) so only final file remains.
+            original_trimmed_file = self.download_conversion_worker.input_file
+            if os.path.exists(original_trimmed_file):
+                try:
+                    os.remove(original_trimmed_file)
+                    self.append_log(
+                        f"Removed trimmed file: {original_trimmed_file}")
+                except Exception as e:
+                    self.append_log(f"Could not remove trimmed file: {e}")
+            item = QListWidgetItem(os.path.basename(output_file))
+            item.setData(Qt.UserRole, output_file)
+            self.output_list.addItem(item)
+            self.download_button.setEnabled(True)
+            self.download_browse_button.setEnabled(True)
+            self.video_url_edit.setEnabled(True)
+            self.download_folder_edit.setEnabled(True)
+            self.download_default_checkbox.setEnabled(True)
+            self.download_goto_button.setEnabled(True)
 
     @Slot(str)
     def append_log(self, text):
@@ -1033,17 +1238,18 @@ class MainWindow(QMainWindow):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
             self.hide_drop_overlay()
-            if self.tab_widget.currentIndex() != 0:
-                self.tab_widget.setCurrentIndex(0)
-            if self.files_tabwidget.currentIndex() != 0:
-                self.files_tabwidget.setCurrentIndex(0)
-            urls = event.mimeData().urls()
-            for url in urls:
-                file_path = url.toLocalFile()
-                if self.is_supported_file(file_path) and not self.file_already_added(file_path):
-                    self.input_list.addItem(file_path)
-            if self.input_list.currentItem() is None and self.input_list.count() > 0:
-                self.input_list.setCurrentRow(0)
+            if event.mimeData().hasUrls():
+                if self.tab_widget.currentIndex() != 0:
+                    self.tab_widget.setCurrentIndex(0)
+                if self.files_tabwidget.currentIndex() != 0:
+                    self.files_tabwidget.setCurrentIndex(0)
+                urls = event.mimeData().urls()
+                for url in urls:
+                    file_path = url.toLocalFile()
+                    if self.is_supported_file(file_path) and not self.file_already_added(file_path):
+                        self.input_list.addItem(file_path)
+                if self.input_list.currentItem() is None and self.input_list.count() > 0:
+                    self.input_list.setCurrentRow(0)
         else:
             event.ignore()
 
@@ -1109,157 +1315,6 @@ class MainWindow(QMainWindow):
         else:
             self.download_folder_edit.setReadOnly(False)
             self.settings.setValue("default_download_checked", False)
-
-    def download_mode_changed(self, index):
-        mode = self.download_mode_combo.currentText()
-        visible_format = mode in [
-            "Download & Convert", "Download & Convert & Trim"]
-        for i in range(self.download_output_format_layout.count()):
-            self.download_output_format_layout.itemAt(
-                i).widget().setVisible(visible_format)
-        if "Trim" in mode:
-            self.trim_widget.show()
-        else:
-            self.trim_widget.hide()
-
-    def start_download(self):
-        url = self.video_url_edit.text().strip()
-        if not url:
-            self.statusBar().showMessage("Please enter a video URL.")
-            return
-        download_folder = self.download_folder_edit.text().strip()
-        if not download_folder:
-            self.statusBar().showMessage("Please select a download folder.")
-            return
-        self.download_button.setEnabled(False)
-        self.download_browse_button.setEnabled(False)
-        self.video_url_edit.setEnabled(False)
-        self.download_folder_edit.setEnabled(False)
-        self.download_default_checkbox.setEnabled(False)
-        self.download_goto_button.setEnabled(False)
-        self.append_log("Starting download...")
-        self.download_worker = DownloadWorker(url, download_folder)
-        self.download_worker.finished.connect(self.download_finished)
-        self.download_worker.error.connect(self.download_error)
-        self.download_worker.progress.connect(self.update_download_progress)
-        self.download_worker.start()
-
-    @Slot(int)
-    def update_download_progress(self, progress):
-        self.download_progress_label.setText(f"Download Progress: {progress}%")
-        self.download_progress_bar.setValue(progress)
-
-    @Slot(str, str)
-    def download_finished(self, message, downloaded_file):
-        self.append_log(message)
-        mode = self.download_mode_combo.currentText()
-        if mode in ["Download & Convert", "Download & Convert & Trim"]:
-            selected_format = self.download_output_format_combo.currentText().strip()
-            if selected_format.endswith(":"):
-                selected_format = "mp4"
-            base = os.path.splitext(downloaded_file)[0]
-            new_file = base + "." + selected_format
-            self.append_log(
-                f"Starting conversion of downloaded file to {selected_format}...")
-            use_gpu_flag = self.gpu_checkbox.isChecked()
-            if selected_format.lower() == "webm":
-                use_gpu_flag = False
-            self.download_conversion_worker = ConversionWorker(
-                downloaded_file, new_file, extra_args=None, use_gpu=use_gpu_flag, quality=100)
-            self.download_conversion_worker.conversionFinished.connect(
-                self.download_conversion_finished)
-            self.download_conversion_worker.conversionError.connect(
-                self.download_conversion_error)
-            self.download_conversion_worker.logMessage.connect(self.append_log)
-            self.download_conversion_worker.start()
-        elif mode == "Download & Trim":
-            self.append_log("Starting trimming of downloaded file...")
-            # Pass GPU flag to TrimWorker here:
-            self.trim_worker = TrimWorker(downloaded_file, self.trim_start_edit.text(
-            ), self.trim_end_edit.text(), use_gpu=self.gpu_checkbox.isChecked())
-            self.trim_worker.finished.connect(self.trim_finished)
-            self.trim_worker.error.connect(self.trim_error)
-            self.trim_worker.start()
-        else:
-            self.download_button.setEnabled(True)
-            self.download_browse_button.setEnabled(True)
-            self.video_url_edit.setEnabled(True)
-            self.download_folder_edit.setEnabled(True)
-            self.download_default_checkbox.setEnabled(True)
-            self.download_goto_button.setEnabled(True)
-
-    @Slot(str, str)
-    def download_conversion_finished(self, output_file, message):
-        self.append_log(f"Download conversion finished: {message}")
-        mode = self.download_mode_combo.currentText()
-        if mode == "Download & Convert & Trim":
-            self.append_log("Starting trimming of converted file...")
-            # Pass GPU flag to TrimWorker here:
-            self.trim_worker = TrimWorker(output_file, self.trim_start_edit.text(
-            ), self.trim_end_edit.text(), use_gpu=self.gpu_checkbox.isChecked())
-            self.trim_worker.finished.connect(self.trim_finished)
-            self.trim_worker.error.connect(self.trim_error)
-            self.trim_worker.start()
-        else:
-            original_file = self.download_conversion_worker.input_file
-            if os.path.exists(original_file):
-                try:
-                    os.remove(original_file)
-                    self.append_log(f"Removed original file: {original_file}")
-                except Exception as e:
-                    self.append_log(f"Could not remove original file: {e}")
-            item = QListWidgetItem(os.path.basename(output_file))
-            item.setData(Qt.UserRole, output_file)
-            self.output_list.addItem(item)
-            self.download_button.setEnabled(True)
-            self.download_browse_button.setEnabled(True)
-            self.video_url_edit.setEnabled(True)
-            self.download_folder_edit.setEnabled(True)
-            self.download_default_checkbox.setEnabled(True)
-            self.download_goto_button.setEnabled(True)
-
-    @Slot(str)
-    def download_conversion_error(self, error_message):
-        self.append_log("Download conversion error: " + error_message)
-        self.download_button.setEnabled(True)
-        self.download_browse_button.setEnabled(True)
-        self.video_url_edit.setEnabled(True)
-        self.download_folder_edit.setEnabled(True)
-        self.download_default_checkbox.setEnabled(True)
-        self.download_goto_button.setEnabled(True)
-
-    @Slot(str)
-    def download_error(self, error_message):
-        self.append_log("Download error: " + error_message)
-        self.download_button.setEnabled(True)
-        self.download_browse_button.setEnabled(True)
-        self.video_url_edit.setEnabled(True)
-        self.download_folder_edit.setEnabled(True)
-        self.download_default_checkbox.setEnabled(True)
-        self.download_goto_button.setEnabled(True)
-
-    @Slot(str, str)
-    def trim_finished(self, message, trimmed_file):
-        self.append_log(message)
-        item = QListWidgetItem(os.path.basename(trimmed_file))
-        item.setData(Qt.UserRole, trimmed_file)
-        self.output_list.addItem(item)
-        self.download_button.setEnabled(True)
-        self.download_browse_button.setEnabled(True)
-        self.video_url_edit.setEnabled(True)
-        self.download_folder_edit.setEnabled(True)
-        self.download_default_checkbox.setEnabled(True)
-        self.download_goto_button.setEnabled(True)
-
-    @Slot(str)
-    def trim_error(self, error_message):
-        self.append_log("Trim error: " + error_message)
-        self.download_button.setEnabled(True)
-        self.download_browse_button.setEnabled(True)
-        self.video_url_edit.setEnabled(True)
-        self.download_folder_edit.setEnabled(True)
-        self.download_default_checkbox.setEnabled(True)
-        self.download_goto_button.setEnabled(True)
 
     def closeEvent(self, event):
         if self.worker is not None and self.worker.isRunning():

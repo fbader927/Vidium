@@ -325,6 +325,8 @@ class MainWindow(QMainWindow):
         self.download_conversion_worker = None
         self.preview_conversion_worker = None
         self.trim_worker = None
+        # Instantiate the GPU checkbox here (it will be moved to the bottom right)
+        self.gpu_checkbox = QCheckBox("Use GPU (Very Fast)")
         self.initUI()
         self.setAcceptDrops(True)
         self.init_drop_overlay()
@@ -470,10 +472,7 @@ class MainWindow(QMainWindow):
         self.populate_output_format_combo()
         format_layout.addWidget(self.output_format_combo)
         convert_layout.addLayout(format_layout)
-        # Options: GPU and Quality
-        options_layout = QVBoxLayout()
-        self.gpu_checkbox = QCheckBox("Use GPU (Very Fast)")
-        options_layout.addWidget(self.gpu_checkbox)
+        # Options: Quality (GPU checkbox has been moved to bottom right)
         quality_layout = QHBoxLayout()
         quality_layout.setContentsMargins(0, 0, 0, 0)
         quality_layout.setSpacing(0)
@@ -495,8 +494,7 @@ class MainWindow(QMainWindow):
         self.quality_value_label.setSizePolicy(
             QSizePolicy.Fixed, QSizePolicy.Fixed)
         quality_layout.addWidget(self.quality_value_label)
-        options_layout.addLayout(quality_layout)
-        convert_layout.addLayout(options_layout)
+        convert_layout.addLayout(quality_layout)
         # Convert and Stop Buttons (Convert Tab)
         button_layout = QHBoxLayout()
         button_layout.setContentsMargins(0, 0, 0, 0)
@@ -584,10 +582,11 @@ class MainWindow(QMainWindow):
         self.download_mode_combo = QComboBox()
         self.download_mode_combo.addItems(
             ["Download Only", "Download & Convert", "Download & Trim", "Download & Convert & Trim"])
-        download_mode_layout.addWidget(self.download_mode_combo)
-        download_layout.addLayout(download_mode_layout)
+        # FIX: Connect the combo box change to update the UI for trim options.
         self.download_mode_combo.currentIndexChanged.connect(
             self.download_mode_changed)
+        download_mode_layout.addWidget(self.download_mode_combo)
+        download_layout.addLayout(download_mode_layout)
         # Conversion Output Format Dropdown for Download Tab
         self.download_output_format_layout = QHBoxLayout()
         self.download_output_format_layout.setAlignment(Qt.AlignLeft)
@@ -603,18 +602,13 @@ class MainWindow(QMainWindow):
             self.download_output_format_layout.itemAt(
                 i).widget().setVisible(False)
         # --- New Trim Time UI for Download Tab ---
-        # Create a container with a vertical layout for the trim controls.
         self.trim_widget = QWidget()
-        # Ensure no extra margins on the container
         self.trim_widget.setContentsMargins(0, 0, 0, 0)
         trim_v_layout = QVBoxLayout(self.trim_widget)
         trim_v_layout.setContentsMargins(0, 0, 0, 0)
-        # Minimal vertical spacing between row and format label
         trim_v_layout.setSpacing(4)
-        # Row with "Trim Range:" and the two FixedTimeLineEdit boxes
         trim_h_layout = QHBoxLayout()
         trim_h_layout.setContentsMargins(0, 0, 0, 0)
-        # Set spacing to 0 and force left alignment
         trim_h_layout.setSpacing(0)
         trim_h_layout.setAlignment(Qt.AlignLeft)
         self.trim_label = QLabel("Trim Range:")
@@ -622,7 +616,6 @@ class MainWindow(QMainWindow):
         self.trim_label.setStyleSheet("margin: 0px; padding: 0px;")
         self.trim_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         trim_h_layout.addWidget(self.trim_label)
-        # Removed extra spacer items for minimal spacing
         time_default = "00:00:00:00"
         self.trim_start_edit = FixedTimeLineEdit()
         self.trim_start_edit.setText(time_default)
@@ -636,7 +629,6 @@ class MainWindow(QMainWindow):
         self.trim_end_edit.setText(time_default)
         trim_h_layout.addWidget(self.trim_end_edit)
         trim_v_layout.addLayout(trim_h_layout)
-        # Instruction label directly below
         self.trim_format_label = QLabel("Format: HH:MM:SS:MS")
         self.trim_format_label.setStyleSheet(
             "font-size: 8pt; color: gray; margin: 0px; padding: 0px;")
@@ -668,6 +660,11 @@ class MainWindow(QMainWindow):
         self.log_text_edit.setFixedHeight(150)
         self.log_text_edit.setFixedWidth(406)
         main_layout.addWidget(self.log_text_edit)
+        # Move GPU checkbox to bottom right near the console log
+        bottom_layout = QHBoxLayout()
+        bottom_layout.addStretch()
+        bottom_layout.addWidget(self.gpu_checkbox)
+        main_layout.addLayout(bottom_layout)
         # Conversion Queue and Progress (Convert Tab)
         self.conversion_queue = []
         self.total_files = 0
@@ -901,8 +898,12 @@ class MainWindow(QMainWindow):
             extra_args = None
             if self.get_selected_format().lower() == "gif":
                 extra_args = ["-vf", "fps=10,scale=320:-1:flags=lanczos"]
+            # Force use_gpu=False if output format is webm
+            use_gpu_flag = self.gpu_checkbox.isChecked()
+            if self.get_selected_format().lower() == "webm":
+                use_gpu_flag = False
             self.worker = ConversionWorker(
-                input_file, output_file, extra_args, self.gpu_checkbox.isChecked(), self.quality_slider.value())
+                input_file, output_file, extra_args, use_gpu_flag, self.quality_slider.value())
             self.worker.setParent(self)
             self.worker.finished.connect(lambda: setattr(self, "worker", None))
             self.worker.conversionFinished.connect(
@@ -944,19 +945,25 @@ class MainWindow(QMainWindow):
         mode = self.download_mode_combo.currentText()
         if mode == "Download & Convert & Trim":
             self.append_log("Starting trimming of converted file...")
-            self.trim_worker = TrimWorker(
-                output_file, self.trim_start_edit.text(), self.trim_end_edit.text())
+            # Pass GPU flag to TrimWorker here:
+            self.trim_worker = TrimWorker(output_file, self.trim_start_edit.text(
+            ), self.trim_end_edit.text(), use_gpu=self.gpu_checkbox.isChecked())
             self.trim_worker.finished.connect(self.trim_finished)
             self.trim_worker.error.connect(self.trim_error)
             self.trim_worker.start()
         else:
-            original_file = self.download_conversion_worker.input_file
-            if os.path.exists(original_file):
-                try:
-                    os.remove(original_file)
-                    self.append_log(f"Removed original file: {original_file}")
-                except Exception as e:
-                    self.append_log(f"Could not remove original file: {e}")
+            # Only remove original file if conversion was triggered by download conversion.
+            if self.download_conversion_worker is not None:
+                original_file = self.download_conversion_worker.input_file
+                if os.path.exists(original_file):
+                    try:
+                        os.remove(original_file)
+                        self.append_log(
+                            f"Removed original file: {original_file}")
+                    except Exception as e:
+                        self.append_log(f"Could not remove original file: {e}")
+            else:
+                self.append_log("Original file preserved.")
             self.output_list.addItem(item)
             self.download_button.setEnabled(True)
             self.download_browse_button.setEnabled(True)
@@ -1004,6 +1011,7 @@ class MainWindow(QMainWindow):
     def show_about(self):
         self.statusBar().showMessage(
             "Vidium Video Converter v1.0\nBuilt with PySide6 and bundled FFmpeg.")
+
     # --- Drag and Drop Event Handlers ---
 
     def dragEnterEvent(self, event):
@@ -1155,8 +1163,11 @@ class MainWindow(QMainWindow):
             new_file = base + "." + selected_format
             self.append_log(
                 f"Starting conversion of downloaded file to {selected_format}...")
+            use_gpu_flag = self.gpu_checkbox.isChecked()
+            if selected_format.lower() == "webm":
+                use_gpu_flag = False
             self.download_conversion_worker = ConversionWorker(
-                downloaded_file, new_file, extra_args=None, use_gpu=self.gpu_checkbox.isChecked(), quality=100)
+                downloaded_file, new_file, extra_args=None, use_gpu=use_gpu_flag, quality=100)
             self.download_conversion_worker.conversionFinished.connect(
                 self.download_conversion_finished)
             self.download_conversion_worker.conversionError.connect(
@@ -1165,8 +1176,9 @@ class MainWindow(QMainWindow):
             self.download_conversion_worker.start()
         elif mode == "Download & Trim":
             self.append_log("Starting trimming of downloaded file...")
-            self.trim_worker = TrimWorker(
-                downloaded_file, self.trim_start_edit.text(), self.trim_end_edit.text())
+            # Pass GPU flag to TrimWorker here:
+            self.trim_worker = TrimWorker(downloaded_file, self.trim_start_edit.text(
+            ), self.trim_end_edit.text(), use_gpu=self.gpu_checkbox.isChecked())
             self.trim_worker.finished.connect(self.trim_finished)
             self.trim_worker.error.connect(self.trim_error)
             self.trim_worker.start()
@@ -1184,8 +1196,9 @@ class MainWindow(QMainWindow):
         mode = self.download_mode_combo.currentText()
         if mode == "Download & Convert & Trim":
             self.append_log("Starting trimming of converted file...")
-            self.trim_worker = TrimWorker(
-                output_file, self.trim_start_edit.text(), self.trim_end_edit.text())
+            # Pass GPU flag to TrimWorker here:
+            self.trim_worker = TrimWorker(output_file, self.trim_start_edit.text(
+            ), self.trim_end_edit.text(), use_gpu=self.gpu_checkbox.isChecked())
             self.trim_worker.finished.connect(self.trim_finished)
             self.trim_worker.error.connect(self.trim_error)
             self.trim_worker.start()

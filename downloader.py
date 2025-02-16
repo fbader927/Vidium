@@ -1,4 +1,5 @@
 import os
+import time
 from PySide6.QtCore import QThread, Signal
 
 
@@ -21,7 +22,7 @@ def detect_video_source(url: str) -> str:
 class DownloadWorker(QThread):
     finished = Signal(str, str)  # Emits a message and the downloaded file path
     error = Signal(str)
-    progress = Signal(int)  # Signal for progress updates
+    progress = Signal(int)       # Signal for progress updates
 
     def __init__(self, url, output_folder):
         super().__init__()
@@ -49,27 +50,43 @@ class DownloadWorker(QThread):
             # Source-specific options:
             if source == "reddit":
                 # For Reddit videos, ensure that video and audio are merged into an MP4 container.
-                ydl_opts.update({
-                    'merge_output_format': 'mp4'
-                })
+                ydl_opts.update({'merge_output_format': 'mp4'})
             elif source == "twitter":
-                # For Twitter videos, ensure that video and audio are merged into an MP4 container.
-                # Set a browser-like User-Agent to help avoid parsing issues.
+                # For Twitter videos, set a browser-like User-Agent to help avoid parsing issues.
                 ydl_opts.update({
                     'merge_output_format': 'mp4',
                     'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
                 })
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                # extract_info with download=True both downloads and returns the info dict
-                info = ydl.extract_info(self.url, download=True)
-                downloaded_file = ydl.prepare_filename(info)
+            # For Twitter, implement a simple retry loop on JSON parsing errors.
+            if source == "twitter":
+                max_retries = 3
+                attempt = 0
+                while attempt < max_retries:
+                    try:
+                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                            info = ydl.extract_info(self.url, download=True)
+                            downloaded_file = ydl.prepare_filename(info)
+                        break  # Successful extraction
+                    except Exception as e:
+                        if "Failed to parse JSON" in str(e) and attempt < max_retries - 1:
+                            attempt += 1
+                            time.sleep(1)  # brief delay before retrying
+                            continue
+                        else:
+                            raise e
+            else:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(self.url, download=True)
+                    downloaded_file = ydl.prepare_filename(info)
+
             self.finished.emit(
                 "Download completed successfully.", downloaded_file)
         except Exception as e:
             error_msg = str(e)
             if "Failed to parse JSON" in error_msg:
-                error_msg += "\nThis error is typically caused by changes in Twitter's API or a temporary issue with the service. Ensure you are using the latest version of yt-dlp (yt-dlp -U) and consider reporting this issue if it persists."
+                error_msg += ("\nThis error is typically caused by changes in Twitter's API or a temporary issue with the service. "
+                              "Ensure you are using the latest version of yt-dlp (yt-dlp -U) and consider reporting this issue if it persists.")
             self.error.emit(error_msg)
 
     def download_hook(self, d):
@@ -83,21 +100,49 @@ class DownloadWorker(QThread):
             self.progress.emit(100)
 
 
-# --- New TrimWorker for trimming downloaded/converted files ---
+# --- Helper to format a time string into a timestamp suffix.
+def format_timestamp(time_str):
+    """
+    Converts a time string in HH:MM:SS:MS format to a compact timestamp.
+    If hours and minutes are zero, returns "SS_MS" (e.g. "40_00").
+    Otherwise, if hours are zero, returns "MM_SS_MS" (e.g. "01_40_00").
+    If hours are nonzero, returns "HH_MM_SS".
+    """
+    parts = time_str.split(":")
+    if len(parts) == 4:
+        hh, mm, ss, ms = parts
+        if hh == "00" and mm == "00":
+            return f"{ss}_{ms}"
+        elif hh == "00":
+            return f"{mm}_{ss}_{ms}"
+        else:
+            return f"{hh}_{mm}_{ss}"
+    elif len(parts) == 3:
+        hh, mm, ss = parts
+        if hh == "00":
+            return f"{mm}_{ss}"
+        else:
+            return f"{hh}_{mm}_{ss}"
+    else:
+        return time_str.replace(":", "_")
+
+
+# --- TrimWorker for trimming downloaded/converted files ---
 class TrimWorker(QThread):
     finished = Signal(str, str)  # Emits a message and the (trimmed) file path
     error = Signal(str)
     progress = Signal(int)
 
-    def __init__(self, input_file, start_time, end_time):
+    def __init__(self, input_file, start_time, end_time, use_gpu=False):
         super().__init__()
         self.input_file = input_file
         self.start_time = start_time
         self.end_time = end_time
+        self.use_gpu = use_gpu
 
     def run(self):
         try:
-            # Convert time strings to seconds for validation
+            # Convert time strings to seconds for validation.
             start_seconds = self._time_to_seconds(self.start_time)
             end_seconds = self._time_to_seconds(self.end_time)
             if start_seconds is None or end_seconds is None:
@@ -107,7 +152,7 @@ class TrimWorker(QThread):
                 self.error.emit("Start time must be less than end time.")
                 return
 
-            # Get video duration for bounds checking
+            # Get video duration for bounds checking.
             duration = self._get_video_duration(self.input_file)
             if duration is None:
                 self.error.emit(
@@ -117,25 +162,50 @@ class TrimWorker(QThread):
                 self.error.emit("End time is out of bounds.")
                 return
 
-            # Create a temporary output file name
-            base, ext = os.path.splitext(self.input_file)
-            temp_output = base + "_trimmed" + ext
-
-            # Convert time strings to FFmpeg-friendly format (HH:MM:SS.MS)
+            # First, run FFmpeg to trim the video to a temporary file.
             ffmpeg_start = self._format_time_for_ffmpeg(self.start_time)
-            # Calculate duration for trimming (in seconds)
             trim_duration = end_seconds - start_seconds
 
-            # Construct FFmpeg command for trimming (fast copy trim)
-            # Updated command: place -ss before -i and use -t for duration
+            # Determine output extension and video encoder based on GPU setting and input file type.
+            base, ext = os.path.splitext(self.input_file)
+            if self.use_gpu:
+                # For GPU trimming, use h264_nvenc.
+                # For WebM inputs, change output to MP4 (since H.264 is not allowed in WebM).
+                if ext.lower() == ".webm":
+                    out_ext = ".mp4"
+                else:
+                    out_ext = ext
+                encoder_args = ["-c:v", "h264_nvenc", "-preset", "fast"]
+            else:
+                # For CPU trimming, if input is WebM, use VP9; otherwise use x264.
+                if ext.lower() == ".webm":
+                    out_ext = ext
+                    encoder_args = ["-c:v", "libvpx-vp9",
+                                    "-crf", "30", "-b:v", "0"]
+                else:
+                    out_ext = ext
+                    encoder_args = ["-c:v", "libx264",
+                                    "-crf", "18", "-preset", "veryfast"]
+
+            # Determine audio arguments based on output extension.
+            if out_ext in [".mp4", ".mkv"]:
+                audio_args = ["-c:a", "aac", "-b:a", "192k"]
+            elif out_ext == ".webm":
+                audio_args = ["-c:a", "libopus", "-b:a", "128k"]
+            else:
+                audio_args = ["-c:a", "copy"]
+
+            temp_output = base + "_temp" + out_ext
+
             import subprocess
             ffmpeg_path = self._get_ffmpeg_path()
             cmd = [
                 ffmpeg_path, "-y",
-                "-ss", ffmpeg_start,
                 "-i", self.input_file,
+                "-ss", ffmpeg_start,
                 "-t", str(trim_duration),
-                "-c", "copy",
+            ] + encoder_args + audio_args + [
+                "-avoid_negative_ts", "make_zero",
                 temp_output
             ]
             process = subprocess.run(
@@ -145,15 +215,28 @@ class TrimWorker(QThread):
                 self.error.emit(f"Trimming failed: {err}")
                 return
 
-            # Replace the original file with the trimmed version
+            # Now, compute the new filename with the appended timestamp.
+            ts_start = format_timestamp(self.start_time)
+            ts_end = format_timestamp(self.end_time)
+            suffix = f"_{ts_start}_to_{ts_end}"
+            max_base_length = 100
+            if len(base) + len(suffix) > max_base_length:
+                base = base[:max_base_length - len(suffix)]
+            new_filename = base + suffix + out_ext
+            new_filepath = os.path.join(
+                os.path.dirname(self.input_file), new_filename)
+
+            # Remove the original file.
             try:
                 os.remove(self.input_file)
             except Exception as e:
                 self.error.emit(f"Failed to remove original file: {e}")
                 return
-            os.rename(temp_output, self.input_file)
+
+            # Rename the temporary trimmed file to the new filename.
+            os.rename(temp_output, new_filepath)
             self.finished.emit(
-                "Trimming completed successfully.", self.input_file)
+                "Trimming completed successfully.", new_filepath)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -161,13 +244,11 @@ class TrimWorker(QThread):
         try:
             parts = time_str.split(":")
             if len(parts) == 3:
-                # Support for HH:MM:SS format
                 hours = float(parts[0])
                 minutes = float(parts[1])
                 seconds = float(parts[2])
                 return hours * 3600 + minutes * 60 + seconds
             elif len(parts) == 4:
-                # Support for HH:MM:SS:MS format (milliseconds)
                 hours = float(parts[0])
                 minutes = float(parts[1])
                 seconds = float(parts[2])
@@ -190,7 +271,6 @@ class TrimWorker(QThread):
 
     def _get_video_duration(self, file_path):
         try:
-            # Use FFprobe (bundled with FFmpeg) to get the video duration
             import subprocess
             ffprobe_path = self._get_ffprobe_path()
             cmd = [
@@ -209,7 +289,6 @@ class TrimWorker(QThread):
             return None
 
     def _get_ffmpeg_path(self):
-        # Reuse the bundled FFmpeg from converter.py
         from converter import get_ffmpeg_path
         return get_ffmpeg_path()
 

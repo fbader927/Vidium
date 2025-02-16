@@ -325,7 +325,7 @@ class MainWindow(QMainWindow):
         self.download_conversion_worker = None
         self.preview_conversion_worker = None
         self.trim_worker = None
-        # Instantiate the GPU checkbox here (it will be moved to the bottom right)
+        # Instantiate the GPU checkbox here
         self.gpu_checkbox = QCheckBox("Use GPU (Very Fast)")
         self.initUI()
         self.setAcceptDrops(True)
@@ -472,7 +472,7 @@ class MainWindow(QMainWindow):
         self.populate_output_format_combo()
         format_layout.addWidget(self.output_format_combo)
         convert_layout.addLayout(format_layout)
-        # Options: Quality (GPU checkbox has been moved to bottom right)
+        # Options: Quality (GPU checkbox has been moved to be next to the console log)
         quality_layout = QHBoxLayout()
         quality_layout.setContentsMargins(0, 0, 0, 0)
         quality_layout.setSpacing(0)
@@ -651,7 +651,7 @@ class MainWindow(QMainWindow):
         download_layout.addWidget(self.download_progress_bar)
         self.tab_widget.addTab(self.download_tab, "Download")
         main_layout.addWidget(self.tab_widget)
-        # Console Log
+        # --- Console Log and GPU Checkbox (moved to the same row with GPU checkbox aligned to top) ---
         self.log_text_edit = QPlainTextEdit()
         self.log_text_edit.setReadOnly(True)
         self.log_text_edit.setPlaceholderText(
@@ -659,12 +659,10 @@ class MainWindow(QMainWindow):
         self.log_text_edit.setLineWrapMode(QPlainTextEdit.WidgetWidth)
         self.log_text_edit.setFixedHeight(150)
         self.log_text_edit.setFixedWidth(406)
-        main_layout.addWidget(self.log_text_edit)
-        # Move GPU checkbox to bottom right near the console log
-        bottom_layout = QHBoxLayout()
-        bottom_layout.addStretch()
-        bottom_layout.addWidget(self.gpu_checkbox)
-        main_layout.addLayout(bottom_layout)
+        console_layout = QHBoxLayout()
+        console_layout.addWidget(self.log_text_edit)
+        console_layout.addWidget(self.gpu_checkbox, alignment=Qt.AlignTop)
+        main_layout.addLayout(console_layout)
         # Conversion Queue and Progress (Convert Tab)
         self.conversion_queue = []
         self.total_files = 0

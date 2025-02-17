@@ -32,33 +32,23 @@ class DownloadWorker(QThread):
     def run(self):
         try:
             import yt_dlp
-            # Ensure the download folder exists
             os.makedirs(self.output_folder, exist_ok=True)
-
             source = detect_video_source(self.url)
             print(f"Detected video source: {source}")
-
             ydl_opts = {
-                # Truncate the title to 100 characters to avoid overly long filenames
                 'outtmpl': os.path.join(self.output_folder, '%(title).100s.%(ext)s'),
                 'format': 'bestvideo+bestaudio/best',
-                'noplaylist': True,  # download only a single video, not a playlist
-                'restrictfilenames': True,  # ensure filenames contain only safe characters
-                'progress_hooks': [self.download_hook]  # add progress hook
+                'noplaylist': True,
+                'restrictfilenames': True,
+                'progress_hooks': [self.download_hook]
             }
-
-            # Source-specific options:
             if source == "reddit":
-                # For Reddit videos, ensure that video and audio are merged into an MP4 container.
                 ydl_opts.update({'merge_output_format': 'mp4'})
             elif source == "twitter":
-                # For Twitter videos, set a browser-like User-Agent to help avoid parsing issues.
                 ydl_opts.update({
                     'merge_output_format': 'mp4',
                     'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
                 })
-
-            # For Twitter, implement a simple retry loop on JSON parsing errors.
             if source == "twitter":
                 max_retries = 3
                 attempt = 0
@@ -67,11 +57,11 @@ class DownloadWorker(QThread):
                         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                             info = ydl.extract_info(self.url, download=True)
                             downloaded_file = ydl.prepare_filename(info)
-                        break  # Successful extraction
+                        break
                     except Exception as e:
                         if "Failed to parse JSON" in str(e) and attempt < max_retries - 1:
                             attempt += 1
-                            time.sleep(1)  # brief delay before retrying
+                            time.sleep(1)
                             continue
                         else:
                             raise e
@@ -79,7 +69,6 @@ class DownloadWorker(QThread):
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(self.url, download=True)
                     downloaded_file = ydl.prepare_filename(info)
-
             self.finished.emit(
                 "Download completed successfully.", downloaded_file)
         except Exception as e:
@@ -100,7 +89,6 @@ class DownloadWorker(QThread):
             self.progress.emit(100)
 
 
-# --- Helper to format a time string into a timestamp suffix.
 def format_timestamp(time_str):
     """
     Converts a time string in HH:MM:SS:MS format to a compact timestamp.
@@ -127,22 +115,23 @@ def format_timestamp(time_str):
         return time_str.replace(":", "_")
 
 
-# --- TrimWorker for trimming downloaded/converted files ---
 class TrimWorker(QThread):
     finished = Signal(str, str)  # Emits a message and the (trimmed) file path
     error = Signal(str)
     progress = Signal(int)
 
-    def __init__(self, input_file, start_time, end_time, use_gpu=False):
+    def __init__(self, input_file, start_time, end_time, use_gpu=False, delete_original=True, output_folder=None):
         super().__init__()
         self.input_file = input_file
         self.start_time = start_time
         self.end_time = end_time
         self.use_gpu = use_gpu
+        self.delete_original = delete_original
+        # If provided, trimmed file will be placed here.
+        self.output_folder = output_folder
 
     def run(self):
         try:
-            # Convert time strings to seconds for validation.
             start_seconds = self._time_to_seconds(self.start_time)
             end_seconds = self._time_to_seconds(self.end_time)
             if start_seconds is None or end_seconds is None:
@@ -151,8 +140,6 @@ class TrimWorker(QThread):
             if start_seconds >= end_seconds:
                 self.error.emit("Start time must be less than end time.")
                 return
-
-            # Get video duration for bounds checking.
             duration = self._get_video_duration(self.input_file)
             if duration is None:
                 self.error.emit(
@@ -161,23 +148,17 @@ class TrimWorker(QThread):
             if end_seconds > duration:
                 self.error.emit("End time is out of bounds.")
                 return
-
-            # First, run FFmpeg to trim the video to a temporary file.
             ffmpeg_start = self._format_time_for_ffmpeg(self.start_time)
             trim_duration = end_seconds - start_seconds
-
-            # Determine output extension and video encoder based on GPU setting and input file type.
-            base, ext = os.path.splitext(self.input_file)
+            # Use only the basename (filename without directory) for output naming
+            base, ext = os.path.splitext(os.path.basename(self.input_file))
             if self.use_gpu:
-                # For GPU trimming, use h264_nvenc.
-                # For WebM inputs, change output to MP4 (since H.264 is not allowed in WebM).
                 if ext.lower() == ".webm":
                     out_ext = ".mp4"
                 else:
                     out_ext = ext
                 encoder_args = ["-c:v", "h264_nvenc", "-preset", "fast"]
             else:
-                # For CPU trimming, if input is WebM, use VP9; otherwise use x264.
                 if ext.lower() == ".webm":
                     out_ext = ext
                     encoder_args = ["-c:v", "libvpx-vp9",
@@ -186,36 +167,31 @@ class TrimWorker(QThread):
                     out_ext = ext
                     encoder_args = ["-c:v", "libx264",
                                     "-crf", "18", "-preset", "veryfast"]
-
-            # Determine audio arguments based on output extension.
             if out_ext in [".mp4", ".mkv"]:
                 audio_args = ["-c:a", "aac", "-b:a", "192k"]
             elif out_ext == ".webm":
                 audio_args = ["-c:a", "libopus", "-b:a", "128k"]
             else:
                 audio_args = ["-c:a", "copy"]
-
-            temp_output = base + "_temp" + out_ext
-
+            # Build a temporary output path in the same folder as the input file
+            temp_output = os.path.join(os.path.dirname(
+                self.input_file), base + "_temp" + out_ext)
             import subprocess
             ffmpeg_path = self._get_ffmpeg_path()
-            cmd = [
-                ffmpeg_path, "-y",
-                "-i", self.input_file,
-                "-ss", ffmpeg_start,
-                "-t", str(trim_duration),
-            ] + encoder_args + audio_args + [
-                "-avoid_negative_ts", "make_zero",
-                temp_output
-            ]
+            if self.use_gpu:
+                gpu_flags = ["-hwaccel", "cuda",
+                             "-hwaccel_output_format", "nv12"]
+                cmd = [ffmpeg_path, "-y"] + gpu_flags + ["-i", self.input_file, "-ss", ffmpeg_start, "-t", str(
+                    trim_duration)] + encoder_args + audio_args + ["-avoid_negative_ts", "make_zero", temp_output]
+            else:
+                cmd = [ffmpeg_path, "-y", "-i", self.input_file, "-ss", ffmpeg_start, "-t", str(
+                    trim_duration)] + encoder_args + audio_args + ["-avoid_negative_ts", "make_zero", temp_output]
             process = subprocess.run(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             if process.returncode != 0:
                 err = process.stderr.decode()
                 self.error.emit(f"Trimming failed: {err}")
                 return
-
-            # Now, compute the new filename with the appended timestamp.
             ts_start = format_timestamp(self.start_time)
             ts_end = format_timestamp(self.end_time)
             suffix = f"_{ts_start}_to_{ts_end}"
@@ -223,17 +199,16 @@ class TrimWorker(QThread):
             if len(base) + len(suffix) > max_base_length:
                 base = base[:max_base_length - len(suffix)]
             new_filename = base + suffix + out_ext
-            new_filepath = os.path.join(
-                os.path.dirname(self.input_file), new_filename)
-
-            # Remove the original file.
-            try:
-                os.remove(self.input_file)
-            except Exception as e:
-                self.error.emit(f"Failed to remove original file: {e}")
-                return
-
-            # Rename the temporary trimmed file to the new filename.
+            # If an output folder is specified, use it; otherwise use the input file's directory.
+            dest_dir = self.output_folder if self.output_folder is not None else os.path.dirname(
+                self.input_file)
+            new_filepath = os.path.join(dest_dir, new_filename)
+            if self.delete_original:
+                try:
+                    os.remove(self.input_file)
+                except Exception as e:
+                    self.error.emit(f"Failed to remove original file: {e}")
+                    return
             os.rename(temp_output, new_filepath)
             self.finished.emit(
                 "Trimming completed successfully.", new_filepath)
@@ -260,10 +235,6 @@ class TrimWorker(QThread):
             return None
 
     def _format_time_for_ffmpeg(self, time_str):
-        """
-        Converts a time string from HH:MM:SS:MS format to HH:MM:SS.MS format.
-        If the time string has three parts, returns it unchanged.
-        """
         parts = time_str.split(":")
         if len(parts) == 4:
             return ":".join(parts[:3]) + "." + parts[3]
@@ -273,12 +244,8 @@ class TrimWorker(QThread):
         try:
             import subprocess
             ffprobe_path = self._get_ffprobe_path()
-            cmd = [
-                ffprobe_path, "-v", "error", "-select_streams", "v:0",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                file_path
-            ]
+            cmd = [ffprobe_path, "-v", "error", "-select_streams", "v:0",
+                   "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path]
             result = subprocess.run(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             duration_str = result.stdout.strip()

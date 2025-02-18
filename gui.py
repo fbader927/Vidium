@@ -999,7 +999,7 @@ class MainWindow(QMainWindow):
             if mode == "Convert Only":
                 extra_args = None
                 if self.get_selected_format().lower() == "gif":
-                    extra_args = ["-vf", "fps=10,scale=320:-1:flags=lanczos"]
+                    extra_args = ["-vf", "fps=12,scale=320:-1:flags=lanczos"]
                 use_gpu_flag = self.gpu_checkbox.isChecked()
                 if self.get_selected_format().lower() == "webm":
                     use_gpu_flag = False

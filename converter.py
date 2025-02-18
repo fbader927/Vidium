@@ -118,15 +118,21 @@ async def convert_file(input_file: str, output_file: str, extra_args: list = Non
     if extra_args is None:
         extra_args = ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
     if use_gpu:
-        gpu_flags = ["-hwaccel", "cuda", "-hwaccel_output_format", "nv12"]
+        pix_fmt = None
+        if "-pix_fmt" in extra_args:
+            idx = extra_args.index("-pix_fmt")
+            if idx + 1 < len(extra_args):
+                pix_fmt = extra_args[idx+1]
+        hwaccel_format = "p010le" if pix_fmt == "p010le" else "nv12"
+        gpu_flags = ["-hwaccel", "cuda",
+                     "-hwaccel_output_format", hwaccel_format]
         args = ["-y"] + gpu_flags + ["-i", input_file] + \
             extra_args + [output_file]
     else:
         args = ["-y", "-i", input_file] + extra_args + [output_file]
-    ffmpeg_path = get_ffmpeg_path()
-    cmd = [ffmpeg_path] + args
-    print(f"Running command: {' '.join(cmd)}")
-    process = await asyncio.create_subprocess_exec(*cmd, stdout=PIPE, stderr=PIPE)
+    full_cmd = [get_ffmpeg_path()] + args
+    print(f"Running command: {' '.join(full_cmd)}")
+    process = await asyncio.create_subprocess_exec(*full_cmd, stdout=PIPE, stderr=PIPE)
     if stop_event is None:
         stdout, stderr = await process.communicate()
         log = ""
@@ -165,6 +171,20 @@ async def convert_file(input_file: str, output_file: str, extra_args: list = Non
                     f"Conversion failed for {input_file} (return code {process.returncode}). Log: {log}")
             print(f"Conversion completed: {output_file}")
             return log
+
+
+def is_video_10bit(input_file: str) -> bool:
+    """
+    Checks if the video is 10-bit by examining the pixel format of the first video stream using ffprobe.
+    Returns True if the pixel format contains '10le'.
+    """
+    ffprobe_path = get_ffprobe_path()
+    cmd = [ffprobe_path, "-v", "error", "-select_streams", "v:0",
+           "-show_entries", "stream=pix_fmt", "-of", "default=noprint_wrappers=1:nokey=1", input_file]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True)
+    pix_fmt = result.stdout.strip()
+    return "10le" in pix_fmt
 
 
 if __name__ == "__main__":

@@ -19,8 +19,9 @@ from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
 import uuid  # For generating unique palette filenames
 
-
 # --- FixedTimeLineEdit subclass ---
+
+
 class FixedTimeLineEdit(QLineEdit):
     FORMAT = "00:00:00:00"
     DIGIT_POSITIONS = [0, 1, 3, 4, 6, 7, 9, 10]
@@ -70,8 +71,9 @@ class FixedTimeLineEdit(QLineEdit):
         self.setCursorPosition(next_pos)
         event.accept()
 
-
 # --- ClickableSlider subclass ---
+
+
 class ClickableSlider(QSlider):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -82,8 +84,9 @@ class ClickableSlider(QSlider):
             event.accept()
         super().mousePressEvent(event)
 
-
 # --- Custom QListWidget with placeholder text ---
+
+
 class PlaceholderListWidget(QListWidget):
     def __init__(self, placeholder, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -119,8 +122,9 @@ def convert_file_with_full_args(args: list) -> str:
         return log
     return asyncio.run(run_cmd())
 
-
 # --- PreviewConversionWorker ---
+
+
 class PreviewConversionWorker(QThread):
     conversionFinished = Signal(str)
 
@@ -147,8 +151,9 @@ class PreviewConversionWorker(QThread):
         subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.conversionFinished.emit(self.output_file)
 
-
 # --- ConversionWorker ---
+
+
 class ConversionWorker(QThread):
     conversionFinished = Signal(str, str)
     conversionError = Signal(str)
@@ -201,7 +206,7 @@ class ConversionWorker(QThread):
 
     async def do_conversion(self):
         import os
-        from converter import run_ffmpeg
+        from converter import run_ffmpeg, get_input_bitrate, convert_file
         ext = os.path.splitext(self.output_file)[1].lower()
         log = ""
         if ext == '.gif':
@@ -227,15 +232,36 @@ class ConversionWorker(QThread):
         elif ext in ['.mp4', '.webm', '.mkv']:
             input_bitrate = get_input_bitrate(self.input_file)
             bitrate_arg = None
+            target_bitrate_k = None
             if input_bitrate:
                 target_bitrate = int(input_bitrate * self.quality / 100)
                 target_bitrate_k = target_bitrate // 1000
                 bitrate_arg = f"{target_bitrate_k}k"
             if self.extra_args is None:
-                base_extra_args = ["-pix_fmt", "yuv420p", "-r", "60",
-                                   "-c:v", "libx264", "-preset", "fast", "-crf", "23"]
+                if ext == ".webm":
+                    # Use VP9 settings optimized for speed while retaining quality.
+                    base_extra_args = [
+                        "-pix_fmt", "yuv420p", "-r", "60",
+                        "-c:v", "libvpx-vp9", "-quality", "good", "-cpu-used", "4",
+                        "-tile-columns", "6", "-frame-parallel", "1",
+                        "-crf", "30", "-b:v", "0"
+                    ]
+                else:
+                    base_extra_args = [
+                        "-pix_fmt", "yuv420p", "-r", "60",
+                        "-c:v", "libx264", "-preset", "fast", "-crf", "23"
+                    ]
             else:
                 base_extra_args = self.extra_args.copy()
+            # For non-GPU conversion at 100% quality (except for webm, which uses its optimized defaults)
+            if not self.use_gpu and self.quality == 100 and ext != ".webm":
+                if "-crf" in base_extra_args:
+                    idx = base_extra_args.index("-crf")
+                    del base_extra_args[idx:idx+2]
+                if self.input_file.lower().endswith(".webm"):
+                    base_extra_args += ["-crf", "23", "-preset", "veryslow"]
+                else:
+                    base_extra_args += ["-crf", "18", "-preset", "veryslow"]
             if self.use_gpu:
                 if "-pix_fmt" in base_extra_args:
                     idx = base_extra_args.index("-pix_fmt")
@@ -255,13 +281,19 @@ class ConversionWorker(QThread):
                 if bitrate_arg:
                     base_extra_args += ["-b:v", bitrate_arg, "-maxrate",
                                         bitrate_arg, "-bufsize", f"{(target_bitrate_k * 2)}k"]
-            else:
-                if bitrate_arg:
-                    base_extra_args += ["-b:v", bitrate_arg]
-            if "-r" not in base_extra_args:
-                base_extra_args += ["-r", "60"]
-            if "-pix_fmt" not in base_extra_args:
-                base_extra_args += ["-pix_fmt", "yuv420p"]
+                if self.quality == 100:
+                    from converter import is_video_10bit
+                    if is_video_10bit(self.input_file):
+                        if "-c:v" in base_extra_args:
+                            idx = base_extra_args.index("-c:v")
+                            base_extra_args[idx+1] = "hevc_nvenc"
+                        else:
+                            base_extra_args = [
+                                "-c:v", "hevc_nvenc", "-preset", "fast"] + base_extra_args
+                        base_extra_args += ["-qp", "18", "-profile:v",
+                                            "main10", "-pix_fmt", "p010le"]
+                    else:
+                        base_extra_args += ["-qp", "18"]
             from converter import convert_file
             log = await convert_file(self.input_file, self.output_file, base_extra_args, use_gpu=self.use_gpu, stop_event=self._stop_event)
         else:
@@ -289,17 +321,18 @@ class ConversionWorker(QThread):
         finally:
             loop.close()
 
-
 # --- MainWindow ---
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Vidium Video Converter")
+        self.setWindowTitle("Vidium")
         self.resize(800, 600)
         self.setStatusBar(QStatusBar())
         self.current_index = 0
         self.overall_progress = 0.0
-        self.settings = QSettings("MyCompany", "VidiumConverter")
+        self.settings = QSettings("FBB", "VidiumConverter")
         self.conversion_aborted = False
         self.conversion_active = False
         self.worker = None
@@ -944,6 +977,24 @@ class MainWindow(QMainWindow):
         if self.current_index < self.total_files:
             mode = self.convert_mode_combo.currentText()
             input_file, output_file = self.conversion_queue[self.current_index]
+            # Only perform the "skip conversion" check for Convert Only mode.
+            if mode == "Convert Only":
+                desired_format = self.get_selected_format().lower()
+                if desired_format.endswith(":"):
+                    desired_format = "mp4"
+                input_ext = os.path.splitext(input_file)[1].lower()
+                if input_ext == "." + desired_format:
+                    self.append_log(
+                        f"Skipping conversion for {input_file} as it is already in the desired format.")
+                    from PySide6.QtWidgets import QListWidgetItem
+                    item = QListWidgetItem(os.path.basename(input_file))
+                    item.setData(Qt.UserRole, input_file)
+                    self.output_list.addItem(item)
+                    self.current_index += 1
+                    overall = int((self.current_index / self.total_files)*100)
+                    self.overall_progress_bar.setValue(overall)
+                    self.start_next_conversion()
+                    return
             self.progress_label_update()
             if mode == "Convert Only":
                 extra_args = None
@@ -952,6 +1003,7 @@ class MainWindow(QMainWindow):
                 use_gpu_flag = self.gpu_checkbox.isChecked()
                 if self.get_selected_format().lower() == "webm":
                     use_gpu_flag = False
+                from converter import convert_file
                 self.worker = ConversionWorker(
                     input_file, output_file, extra_args, use_gpu_flag, self.quality_slider.value())
                 self.worker.setParent(self)
@@ -969,8 +1021,10 @@ class MainWindow(QMainWindow):
                 self.append_log("Starting trimming for file: " + input_file)
                 self.media_player.stop()
                 use_gpu_flag = self.gpu_checkbox.isChecked()
+                # For both Trim Only and Trim & Convert, use stream copy trimming (copy_mode=True)
+                copy_mode_flag = True
                 self.trim_worker = TrimWorker(input_file, self.convert_trim_start_edit.text(),
-                                              self.convert_trim_end_edit.text(), use_gpu=use_gpu_flag, delete_original=False, output_folder=self.output_folder_edit.text())
+                                              self.convert_trim_end_edit.text(), use_gpu=use_gpu_flag, delete_original=False, output_folder=self.output_folder_edit.text(), copy_mode=copy_mode_flag)
                 self.trim_worker.finished.connect(self.convert_trim_finished)
                 self.trim_worker.error.connect(self.convert_trim_error)
                 self.trim_worker.start()
@@ -1009,6 +1063,7 @@ class MainWindow(QMainWindow):
                 self.append_log(
                     f"Could not remove intermediate trimmed file: {e}")
             self.intermediate_file = None
+        from PySide6.QtWidgets import QListWidgetItem
         item = QListWidgetItem(os.path.basename(output_file))
         item.setData(Qt.UserRole, output_file)
         self.output_list.addItem(item)
@@ -1082,6 +1137,9 @@ class MainWindow(QMainWindow):
                 selected_format = "mp4"
             base = os.path.splitext(trimmed_file)[0]
             new_file = base + "." + selected_format
+            # Avoid in-place conversion if the trimmed file already has the same extension.
+            if os.path.splitext(trimmed_file)[1].lower() == "." + selected_format.lower():
+                new_file = base + "_converted." + selected_format
             self.append_log(
                 f"Starting conversion of trimmed file to {selected_format}...")
             use_gpu_flag = self.gpu_checkbox.isChecked()
@@ -1089,13 +1147,12 @@ class MainWindow(QMainWindow):
                 use_gpu_flag = False
             from converter import convert_file
             self.worker = ConversionWorker(
-                trimmed_file, new_file, extra_args=None, use_gpu=use_gpu_flag, quality=100)
+                trimmed_file, new_file, extra_args=None, use_gpu=use_gpu_flag, quality=self.quality_slider.value())
             self.worker.conversionFinished.connect(
                 self.file_conversion_finished)
             self.worker.conversionError.connect(self.file_conversion_error)
             self.worker.logMessage.connect(self.append_log)
             self.worker.start()
-            # For "Trim & Convert" mode, do not increment current_index or call start_next_conversion here.
         else:
             from PySide6.QtWidgets import QListWidgetItem
             item = QListWidgetItem(os.path.basename(trimmed_file))
@@ -1124,21 +1181,22 @@ class MainWindow(QMainWindow):
                 selected_format = "mp4"
             base = os.path.splitext(trimmed_file)[0]
             new_file = base + "." + selected_format
+            if os.path.splitext(trimmed_file)[1].lower() == "." + selected_format.lower():
+                new_file = base + "_converted." + selected_format
             self.append_log(
                 f"Starting conversion of trimmed file to {selected_format}...")
             use_gpu_flag = self.gpu_checkbox.isChecked()
             if selected_format.lower() == "webm":
                 use_gpu_flag = False
-            from converter import convert_file
             self.download_conversion_worker = ConversionWorker(
-                trimmed_file, new_file, extra_args=None, use_gpu=use_gpu_flag, quality=100)
+                trimmed_file, new_file, extra_args=None, use_gpu=use_gpu_flag, quality=self.quality_slider.value())
             self.download_conversion_worker.conversionFinished.connect(
                 self.download_conversion_finished)
             self.download_conversion_worker.conversionError.connect(
                 self.download_conversion_error)
             self.download_conversion_worker.logMessage.connect(self.append_log)
             self.download_conversion_worker.start()
-        else:
+        elif mode == "Download & Trim":
             from PySide6.QtWidgets import QListWidgetItem
             item = QListWidgetItem(os.path.basename(trimmed_file))
             item.setData(Qt.UserRole, trimmed_file)
@@ -1286,6 +1344,22 @@ class MainWindow(QMainWindow):
             selected_format = self.download_output_format_combo.currentText().strip()
             if selected_format.endswith(":"):
                 selected_format = "mp4"
+            # --- SKIP conversion if downloaded file is already in desired format ---
+            download_ext = os.path.splitext(downloaded_file)[1].lower()
+            if download_ext == "." + selected_format.lower():
+                self.append_log(
+                    f"Skipping conversion for {downloaded_file} as it is already in the desired format.")
+                from PySide6.QtWidgets import QListWidgetItem
+                item = QListWidgetItem(os.path.basename(downloaded_file))
+                item.setData(Qt.UserRole, downloaded_file)
+                self.output_list.addItem(item)
+                self.download_button.setEnabled(True)
+                self.download_browse_button.setEnabled(True)
+                self.video_url_edit.setEnabled(True)
+                self.download_folder_edit.setEnabled(True)
+                self.download_default_checkbox.setEnabled(True)
+                self.download_goto_button.setEnabled(True)
+                return
             base = os.path.splitext(downloaded_file)[0]
             new_file = base + "." + selected_format
             self.append_log(
@@ -1293,8 +1367,9 @@ class MainWindow(QMainWindow):
             use_gpu_flag = self.gpu_checkbox.isChecked()
             if selected_format.lower() == "webm":
                 use_gpu_flag = False
+            from converter import convert_file
             self.download_conversion_worker = ConversionWorker(
-                downloaded_file, new_file, extra_args=None, use_gpu=use_gpu_flag, quality=100)
+                downloaded_file, new_file, extra_args=None, use_gpu=use_gpu_flag, quality=self.quality_slider.value())
             self.download_conversion_worker.conversionFinished.connect(
                 self.download_conversion_finished)
             self.download_conversion_worker.conversionError.connect(
@@ -1305,14 +1380,14 @@ class MainWindow(QMainWindow):
             self.append_log(
                 "Starting trimming of downloaded file (for conversion and trimming)...")
             self.trim_worker = TrimWorker(downloaded_file, self.trim_start_edit.text(
-            ), self.trim_end_edit.text(), use_gpu=self.gpu_checkbox.isChecked())
+            ), self.trim_end_edit.text(), use_gpu=self.gpu_checkbox.isChecked(), copy_mode=False)
             self.trim_worker.finished.connect(self.trim_finished)
             self.trim_worker.error.connect(self.trim_error)
             self.trim_worker.start()
         elif mode == "Download & Trim":
             self.append_log("Starting trimming of downloaded file...")
             self.trim_worker = TrimWorker(downloaded_file, self.trim_start_edit.text(
-            ), self.trim_end_edit.text(), use_gpu=self.gpu_checkbox.isChecked())
+            ), self.trim_end_edit.text(), use_gpu=self.gpu_checkbox.isChecked(), copy_mode=True)
             self.trim_worker.finished.connect(self.trim_finished)
             self.trim_worker.error.connect(self.trim_error)
             self.trim_worker.start()

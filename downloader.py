@@ -1,6 +1,8 @@
 import os
 import time
 from PySide6.QtCore import QThread, Signal
+# For bitrate and 10-bit check
+from converter import get_input_bitrate, is_video_10bit
 
 
 def detect_video_source(url: str) -> str:
@@ -120,15 +122,19 @@ class TrimWorker(QThread):
     error = Signal(str)
     progress = Signal(int)
 
-    def __init__(self, input_file, start_time, end_time, use_gpu=False, delete_original=True, output_folder=None):
+    def __init__(self, input_file, start_time, end_time, use_gpu=False, delete_original=True, output_folder=None, copy_mode=False):
+        """
+        If copy_mode is True, we use stream copy (lossless) for trimming.
+        Otherwise, we re-encode using high-quality parameters that preserve the original bitrate.
+        """
         super().__init__()
         self.input_file = input_file
         self.start_time = start_time
         self.end_time = end_time
         self.use_gpu = use_gpu
         self.delete_original = delete_original
-        # If provided, trimmed file will be placed here.
         self.output_folder = output_folder
+        self.copy_mode = copy_mode
 
     def run(self):
         try:
@@ -148,58 +154,75 @@ class TrimWorker(QThread):
             if end_seconds > duration:
                 self.error.emit("End time is out of bounds.")
                 return
+            # For accurate trimming (avoiding stutter) use -ss after the input
             ffmpeg_start = self._format_time_for_ffmpeg(self.start_time)
             trim_duration = end_seconds - start_seconds
-            # Use only the basename (filename without directory) for output naming
             base, ext = os.path.splitext(os.path.basename(self.input_file))
-            if self.use_gpu:
-                if ext.lower() == ".webm":
-                    out_ext = ".mp4"
-                else:
-                    out_ext = ext
-                encoder_args = ["-c:v", "h264_nvenc", "-preset", "fast"]
-            else:
-                if ext.lower() == ".webm":
-                    out_ext = ext
-                    encoder_args = ["-c:v", "libvpx-vp9",
-                                    "-crf", "30", "-b:v", "0"]
-                else:
-                    out_ext = ext
-                    encoder_args = ["-c:v", "libx264",
-                                    "-crf", "18", "-preset", "veryfast"]
-            if out_ext in [".mp4", ".mkv"]:
-                audio_args = ["-c:a", "aac", "-b:a", "192k"]
-            elif out_ext == ".webm":
-                audio_args = ["-c:a", "libopus", "-b:a", "128k"]
-            else:
-                audio_args = ["-c:a", "copy"]
+            # For "Trim & Convert" mode (non-copy mode) force the temporary output to be .mp4 for compatibility
+            if not self.copy_mode:
+                ext = ".mp4"
             # Build a temporary output path in the same folder as the input file
             temp_output = os.path.join(os.path.dirname(
-                self.input_file), base + "_temp" + out_ext)
+                self.input_file), base + "_temp" + ext)
             import subprocess
             ffmpeg_path = self._get_ffmpeg_path()
-            if self.use_gpu:
-                gpu_flags = ["-hwaccel", "cuda",
-                             "-hwaccel_output_format", "nv12"]
-                cmd = [ffmpeg_path, "-y"] + gpu_flags + ["-i", self.input_file, "-ss", ffmpeg_start, "-t", str(
-                    trim_duration)] + encoder_args + audio_args + ["-avoid_negative_ts", "make_zero", temp_output]
+
+            audio_args = ["-c:a", "copy"]
+
+            if self.copy_mode:
+                # For stream copy, using fast seek (-ss before -i) is acceptable.
+                cmd = [ffmpeg_path, "-y", "-ss", ffmpeg_start, "-i", self.input_file,
+                       "-t", str(trim_duration), "-c", "copy", temp_output]
             else:
-                cmd = [ffmpeg_path, "-y", "-i", self.input_file, "-ss", ffmpeg_start, "-t", str(
-                    trim_duration)] + encoder_args + audio_args + ["-avoid_negative_ts", "make_zero", temp_output]
+                # For re-encoding, use accurate trimming by placing -ss after -i.
+                from converter import get_input_bitrate
+                input_bitrate = get_input_bitrate(self.input_file)
+                if input_bitrate:
+                    target_bitrate = input_bitrate  # use original bitrate
+                    target_bitrate_k = target_bitrate // 1000
+                else:
+                    target_bitrate_k = 5000  # fallback value
+
+                if self.use_gpu:
+                    if is_video_10bit(self.input_file):
+                        gpu_flags = ["-hwaccel", "cuda",
+                                     "-hwaccel_output_format", "nv12"]
+                        encoder_args = ["-c:v", "hevc_nvenc", "-qp", "18", "-profile:v", "main10", "-pix_fmt", "p010le",
+                                        "-b:v", f"{target_bitrate_k}k", "-maxrate", f"{target_bitrate_k}k",
+                                        "-bufsize", f"{target_bitrate_k * 2}k"]
+                    else:
+                        gpu_flags = ["-hwaccel", "cuda",
+                                     "-hwaccel_output_format", "nv12"]
+                        encoder_args = ["-c:v", "h264_nvenc", "-qp", "18",
+                                        "-b:v", f"{target_bitrate_k}k", "-maxrate", f"{target_bitrate_k}k",
+                                        "-bufsize", f"{target_bitrate_k * 2}k"]
+                    cmd = [ffmpeg_path, "-y"] + gpu_flags + ["-i", self.input_file, "-ss", ffmpeg_start,
+                                                             "-t", str(trim_duration)] + encoder_args + audio_args + [temp_output]
+                else:
+                    if ext.lower() == ".webm":
+                        encoder_args = ["-c:v", "libvpx-vp9", "-b:v", f"{target_bitrate_k}k",
+                                        "-maxrate", f"{target_bitrate_k}k", "-bufsize", f"{target_bitrate_k * 2}k"]
+                    else:
+                        encoder_args = ["-c:v", "libx264", "-preset", "veryslow", "-b:v", f"{target_bitrate_k}k",
+                                        "-maxrate", f"{target_bitrate_k}k", "-bufsize", f"{target_bitrate_k * 2}k"]
+                    cmd = [ffmpeg_path, "-y", "-i", self.input_file, "-ss", ffmpeg_start,
+                           "-t", str(trim_duration)] + encoder_args + audio_args + [temp_output]
+
+            print("Running trim command:", " ".join(cmd))
             process = subprocess.run(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             if process.returncode != 0:
                 err = process.stderr.decode()
                 self.error.emit(f"Trimming failed: {err}")
                 return
+
             ts_start = format_timestamp(self.start_time)
             ts_end = format_timestamp(self.end_time)
             suffix = f"_{ts_start}_to_{ts_end}"
             max_base_length = 100
             if len(base) + len(suffix) > max_base_length:
                 base = base[:max_base_length - len(suffix)]
-            new_filename = base + suffix + out_ext
-            # If an output folder is specified, use it; otherwise use the input file's directory.
+            new_filename = base + suffix + ext
             dest_dir = self.output_folder if self.output_folder is not None else os.path.dirname(
                 self.input_file)
             new_filepath = os.path.join(dest_dir, new_filename)

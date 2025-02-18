@@ -5,7 +5,8 @@ import sys
 import subprocess
 from asyncio.subprocess import PIPE
 
-OUTPUT_FOLDER = r"C:\Users\fbb92\OneDrive\Documents\Projects\Vidium\Output"
+OUTPUT_FOLDER = os.path.join(os.path.dirname(
+    os.path.abspath(__file__)), "Output")
 
 
 def get_ffmpeg_path() -> str:
@@ -186,59 +187,3 @@ def is_video_10bit(input_file: str) -> bool:
     pix_fmt = result.stdout.strip()
     return "10le" in pix_fmt
 
-
-if __name__ == "__main__":
-    async def main():
-        test_video = r"C:\Users\fbb92\OneDrive\Documents\Projects\Vidium\dang.webm"
-        base = os.path.splitext(os.path.basename(test_video))[0]
-
-        gif_output = os.path.join(OUTPUT_FOLDER, base + ".gif")
-        try:
-            print("Starting conversion to GIF with GPU...")
-            if True:
-                palette_args = ["-y", "-hwaccel", "cuda", "-hwaccel_output_format", "nv12",
-                                "-i", test_video,
-                                "-vf", "fps=10,scale_npp=320:-1,palettegen",
-                                os.path.join(OUTPUT_FOLDER, "palette_temp.png")]
-                ret = await run_ffmpeg(palette_args)
-                if ret != 0:
-                    raise RuntimeError(
-                        "Palette generation for GIF failed (GPU).")
-                gif_args = ["-y", "-hwaccel", "cuda", "-hwaccel_output_format", "nv12",
-                            "-i", test_video,
-                            "-i", os.path.join(OUTPUT_FOLDER,
-                                               "palette_temp.png"),
-                            "-filter_complex", "fps=10,scale_npp=320:-1[p];[p][1:v]paletteuse",
-                            gif_output]
-                log = await run_ffmpeg(gif_args)
-                palette_file = os.path.join(OUTPUT_FOLDER, "palette_temp.png")
-                if os.path.exists(palette_file):
-                    os.remove(palette_file)
-            else:
-                log = await convert_file(test_video, gif_output, extra_args=["-vf", "fps=10,scale=320:-1:flags=lanczos"], use_gpu=False)
-            print(log)
-        except Exception as e:
-            print(f"Error during GIF conversion: {e}", file=sys.stderr)
-
-        mp4_output = os.path.join(OUTPUT_FOLDER, base + ".mp4")
-        try:
-            print("Starting conversion to MP4 with GPU...")
-            gpu_extra_args = ["-r", "60", "-c:v",
-                              "h264_nvenc", "-preset", "fast"]
-            if test_video.lower().endswith(".webm"):
-                gpu_extra_args += ["-tile-columns",
-                                   "6", "-frame-parallel", "1"]
-            log = await convert_file(test_video, mp4_output, extra_args=gpu_extra_args, use_gpu=True)
-            print(log)
-        except Exception as e:
-            print(f"Error during MP4 conversion: {e}", file=sys.stderr)
-
-        mp3_output = os.path.join(OUTPUT_FOLDER, base + ".mp3")
-        try:
-            print("Starting audio extraction...")
-            log = await convert_file(test_video, mp3_output, extra_args=["-q:a", "0", "-map", "a"], use_gpu=False)
-            print(log)
-        except Exception as e:
-            print(f"Error during audio extraction: {e}", file=sys.stderr)
-
-    asyncio.run(main())

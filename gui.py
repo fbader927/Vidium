@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QCheckBox, QSlider, QListWidget, QListWidgetItem, QSizePolicy, QProgressBar,
     QGroupBox, QStyle, QTabWidget, QStatusBar, QSpacerItem
 )
-from PySide6.QtGui import QStandardItemModel, QStandardItem, QFont, QPainter
+from PySide6.QtGui import QStandardItemModel, QStandardItem, QFont, QPainter, QIcon
 from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer, QSettings, QPoint, QUrl, QSize, QEvent
 from converter import convert_file, OUTPUT_FOLDER, get_input_bitrate, run_ffmpeg, get_ffmpeg_path
 # Import the downloader functionality and TrimWorker
@@ -333,6 +333,14 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Vidium")
         self.resize(800, 600)
+        
+        if getattr(sys, 'frozen', False):
+            base_path = os.path.dirname(sys.executable)
+        else:
+            base_path = os.path.abspath(".")
+            
+        icon_path = os.path.join(base_path, "_internal", "vicon.ico")
+        self.setWindowIcon(QIcon(icon_path))
         self.setStatusBar(QStatusBar())
         self.current_index = 0
         self.overall_progress = 0.0
@@ -1494,6 +1502,14 @@ class MainWindow(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    
+    if getattr(sys, 'frozen', False):
+        base_path = os.path.dirname(sys.executable)
+    else:
+        base_path = os.path.abspath(".")
+        
+    icon_path = os.path.join(base_path, "_internal", "vicon.ico")
+    app.setWindowIcon(QIcon(icon_path))
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

@@ -1,8 +1,9 @@
+# downloader.py
 import os
 import time
 from PySide6.QtCore import QThread, Signal
 # For bitrate and 10-bit check
-from converter import get_input_bitrate, is_video_10bit
+from converter import get_input_bitrate, is_video_10bit, get_ffmpeg_path
 
 
 def detect_video_source(url: str) -> str:
@@ -37,12 +38,14 @@ class DownloadWorker(QThread):
             os.makedirs(self.output_folder, exist_ok=True)
             source = detect_video_source(self.url)
             print(f"Detected video source: {source}")
+            # Include ffmpeg_location so yt_dlp can merge formats
             ydl_opts = {
                 'outtmpl': os.path.join(self.output_folder, '%(title).100s.%(ext)s'),
                 'format': 'bestvideo+bestaudio/best',
                 'noplaylist': True,
                 'restrictfilenames': True,
-                'progress_hooks': [self.download_hook]
+                'progress_hooks': [self.download_hook],
+                'ffmpeg_location': os.path.dirname(get_ffmpeg_path())
             }
             if source == "reddit":
                 ydl_opts.update({'merge_output_format': 'mp4'})

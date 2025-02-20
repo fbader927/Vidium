@@ -209,8 +209,8 @@ class TrimWorker(QThread):
                            "-t", str(trim_duration)] + encoder_args + audio_args + [temp_output]
 
             print("Running trim command:", " ".join(cmd))
-            process = subprocess.run(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     creationflags=subprocess.CREATE_NO_WINDOW)
             if process.returncode != 0:
                 err = process.stderr.decode()
                 self.error.emit(f"Trimming failed: {err}")

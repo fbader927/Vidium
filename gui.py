@@ -134,22 +134,24 @@ class PreviewConversionWorker(QThread):
         self.output_file = output_file
         self.use_gpu = use_gpu
 
-    def run(self):
-        ffmpeg_path = get_ffmpeg_path()
-        cmd = [ffmpeg_path, "-y"]
-        if self.use_gpu:
-            gpu_flags = ["-hwaccel", "cuda", "-hwaccel_output_format", "nv12"]
-            cmd.extend(gpu_flags)
-        cmd.extend([
-            "-i", self.input_file,
-            "-t", "30",
-            "-c:v", "libvpx", "-crf", "30", "-b:v", "500k",
-            "-c:a", "libvorbis",
-            "-f", "webm",
-            self.output_file
-        ])
-        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.conversionFinished.emit(self.output_file)
+
+def run(self):
+    ffmpeg_path = get_ffmpeg_path()
+    cmd = [ffmpeg_path, "-y"]
+    if self.use_gpu:
+        gpu_flags = ["-hwaccel", "cuda", "-hwaccel_output_format", "nv12"]
+        cmd.extend(gpu_flags)
+    cmd.extend([
+        "-i", self.input_file,
+        "-t", "30",
+        "-c:v", "libvpx", "-crf", "30", "-b:v", "500k",
+        "-c:a", "libvorbis",
+        "-f", "webm",
+        self.output_file
+    ])
+    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                   creationflags=subprocess.CREATE_NO_WINDOW)
+    self.conversionFinished.emit(self.output_file)
 
 # --- ConversionWorker ---
 
@@ -213,6 +215,8 @@ class ConversionWorker(QThread):
             desired_fps = 30 if self.quality >= 80 else 10
             palette_file = os.path.join(
                 OUTPUT_FOLDER, f"palette_temp_{uuid.uuid4().hex}.png")
+            # Ensure the directory exists (fix for installed app)
+            os.makedirs(os.path.dirname(palette_file), exist_ok=True)
             try:
                 palette_args = ["-y", "-i", self.input_file, "-vf",
                                 f"fps={desired_fps},scale=320:-1:flags=lanczos,palettegen",

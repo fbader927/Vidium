@@ -32,7 +32,7 @@ Vidium is a **GPU-accelerated media converter and downloader** built with **PySi
 
 | **Input Formats** | **Output Formats**        |
 |------------------|---------------------------|
-| `.mp4`, `.mkv`, `.webm` | `.mp4`, `.mkv`, `.webm`, `.mp3`, `.wav`, `.gif` |
+| `.mp4` `.mkv` `.webm` | `.mp4` `.mkv` `.webm` `.mp3` `.wav` `.gif` |
 
 ---
 

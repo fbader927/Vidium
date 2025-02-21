@@ -1,4 +1,4 @@
-# 🎬 Vidium – High-Performance Media Converter & Downloader
+# 🎬 Vidium – High-Performance, Lightweight Media Converter & Downloader
 
 Vidium is a **GPU-accelerated media converter and downloader** built with **PySide6** and **FFmpeg**. Designed for **Windows 11**, it supports a wide range of video and audio formats, trimming, batch processing, and downloading.
 

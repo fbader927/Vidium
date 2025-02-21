@@ -18,7 +18,9 @@ Vidium is a **GPU-accelerated media converter and downloader** built with **PySi
 - **Platform Integration**: Download videos from **YouTube, Reddit, Twitter**, and more via **yt-dlp**.
 - **Download & Convert**: Instantly convert downloaded media to your preferred format.
 - **Download & Trim**: Cut out specific sections of videos directly after downloading.
+- **Download & Convert & Trim**: Enough said.
 
+  
 ### ⚡ **Performance-Oriented**
 - **Batch Processing**: Queue multiple files for conversion or download.
 - **Drag & Drop**: Quickly add files by simply dragging them into the app.

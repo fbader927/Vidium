@@ -12,7 +12,7 @@ Vidium is a **GPU-accelerated media converter and downloader** built with **PySi
 - **High-Speed WebM Encoding**: Optimized VP9 settings for efficient CPU-based conversions.
 - **Trimming**: Accurately trim videos without re-encoding (stream copy) or with re-encoding for precise edits.
 - **Trim & Convert**: Trim videos before converting them to your desired format.
-- **GIF Creation**: Generate high-quality GIFs with customizable FPS (default **12 FPS** for balance).
+- **GIF Creation**: Generate high-quality GIFs easily from any video.
 
 ### 📥 **Media Downloader**
 - **Platform Integration**: Download videos from **YouTube, Reddit, Twitter**, and more via **yt-dlp**.

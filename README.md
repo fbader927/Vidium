@@ -47,3 +47,7 @@ Vidium is a **GPU-accelerated media converter and downloader** built with **PySi
 - **Python 3.9+**
 - **FFmpeg** *(Bundled, no need for manual installation)*
 - **yt-dlp** *(Bundled)*
+
+Install requirements:
+- `pip install -r requirements.txt`
+

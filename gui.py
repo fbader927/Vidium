@@ -12,154 +12,137 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QStandardItemModel, QStandardItem, QFont, QPainter, QIcon
 from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer, QSettings, QPoint, QUrl, QSize, QEvent
 from converter import convert_file, OUTPUT_FOLDER, get_input_bitrate, run_ffmpeg, get_ffmpeg_path
-# Import the downloader functionality and TrimWorker
 from downloader import DownloadWorker, TrimWorker
-# Imports for video preview
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
-import uuid  # For generating unique palette filenames
+import uuid  
 
-# --- FixedTimeLineEdit subclass ---
-
-
+# allow for editing timestamps for trimming videos
 class FixedTimeLineEdit(QLineEdit):
-    FORMAT = "00:00:00:00"
-    DIGIT_POSITIONS = [0, 1, 3, 4, 6, 7, 9, 10]
+    FORMAT = "00:00:00:00" # default timestamp format (HH:MM:SS:FF)
+    DIGIT_POSITIONS = [0, 1, 3, 4, 6, 7, 9, 10] # positions of digits for edit
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None): # initialize required elements for GUI
         super().__init__(parent)
-        self.setText(self.FORMAT)
-        self.setFixedWidth(100)
-        self.setContextMenuPolicy(Qt.NoContextMenu)
-        self.setAlignment(Qt.AlignCenter)
-        self.setStyleSheet("margin: 0px; padding: 0px;")
+        self.setText(self.FORMAT) # set initial text to default format
+        self.setFixedWidth(100) 
+        self.setContextMenuPolicy(Qt.NoContextMenu) # disable right click
+        self.setAlignment(Qt.AlignCenter) # text alignment
+        self.setStyleSheet("margin: 0px; padding: 0px;") # remove spacing
 
-    def keyPressEvent(self, event):
+    def keyPressEvent(self, event): # allow for user editing of the trim textboxes with strict rules
         key = event.key()
         text = event.text()
         if key in (Qt.Key_Backspace, Qt.Key_Delete):
-            event.ignore()
+            event.ignore() # block backspace and delete to prevent breaking format
             return
         if key in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Tab, Qt.Key_Backtab, Qt.Key_Home, Qt.Key_End):
-            super().keyPressEvent(event)
+            super().keyPressEvent(event) # allow navigation keys
             return
-        if not text.isdigit():
+        if not text.isdigit(): # only allow digits, ignore everything else
             event.ignore()
             return
-        current = list(self.text())
-        cursor = self.cursorPosition()
-        if self.hasSelectedText():
+        current = list(self.text()) # convert text to list for easier manip
+        cursor = self.cursorPosition() 
+        if self.hasSelectedText(): # if text is selected, overwrite from point of selection
             start = self.selectionStart()
             indices = [i for i in self.DIGIT_POSITIONS if i >=
                        start and i < start + len(self.selectedText())]
             pos = indices[0] if indices else start
         else:
-            pos = cursor
+            pos = cursor # if no selection use cursor
         while pos not in self.DIGIT_POSITIONS and pos < len(current):
-            pos += 1
+            pos += 1 # skip non-digit positions
         i = 0
-        while i < len(text) and pos < len(current):
+        while i < len(text) and pos < len(current): # insert new digits into correct posish
             if pos in self.DIGIT_POSITIONS:
                 current[pos] = text[i]
                 i += 1
             pos += 1
             while pos < len(current) and pos not in self.DIGIT_POSITIONS:
-                pos += 1
+                pos += 1 # skip over colons if encountered
         new_text = "".join(current)
-        self.setText(new_text)
-        next_pos = pos if pos in self.DIGIT_POSITIONS else len(new_text)
+        self.setText(new_text) # update text with new values
+        next_pos = pos if pos in self.DIGIT_POSITIONS else len(new_text) # move cursor
         self.setCursorPosition(next_pos)
-        event.accept()
+        event.accept() # mark event handled
 
-# --- ClickableSlider subclass ---
-
-
-class ClickableSlider(QSlider):
+class ClickableSlider(QSlider): # slider element for conversion quality
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.LeftButton: # only respond to left click
             new_value = QStyle.sliderValueFromPosition(
-                self.minimum(), self.maximum(), event.x(), self.width())
-            self.setValue(new_value)
-            self.sliderMoved.emit(new_value)
-            event.accept()
-        super().mousePressEvent(event)
+                self.minimum(), self.maximum(), event.x(), self.width()) # calculate value based on click position
+            self.setValue(new_value) # set slider to new value
+            self.sliderMoved.emit(new_value) # 
+            event.accept() # mark event handled
+        super().mousePressEvent(event) # ensure default behavior still applies 
 
-# --- Custom QListWidget with placeholder text ---
-
-
-class PlaceholderListWidget(QListWidget):
+class PlaceholderListWidget(QListWidget): # widget with placeholder text if empty
     def __init__(self, placeholder, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.placeholder = placeholder
+        self.placeholder = placeholder # text to display if list is empty
 
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        if self.count() == 0:
-            painter = QPainter(self.viewport())
+    def paintEvent(self, event): # override paintEvent to draw placeholder
+        super().paintEvent(event) # keep default painting behavior
+        if self.count() == 0: # if list is empty, show placeholder
+            painter = QPainter(self.viewport()) 
             painter.setPen(Qt.gray)
             painter.drawText(self.viewport().rect(),
                              Qt.AlignCenter, self.placeholder)
 
-
-def convert_file_with_full_args(args: list) -> str:
-    import asyncio
-    ffmpeg_path = get_ffmpeg_path()
-    cmd = [ffmpeg_path] + args
+def convert_file_with_full_args(args: list) -> str: # runs ffmpeg with full arguments and returns log
+    ffmpeg_path = get_ffmpeg_path() 
+    cmd = [ffmpeg_path] + args # build full ffmpeg command list
     print(f"Running command: {' '.join(cmd)}")
 
     async def run_cmd():
         from asyncio.subprocess import PIPE
-        process = await asyncio.create_subprocess_exec(*cmd, stdout=PIPE, stderr=PIPE)
-        stdout, stderr = await process.communicate()
+        process = await asyncio.create_subprocess_exec(*cmd, stdout=PIPE, stderr=PIPE) # run ffmpeg asynchronously 
+        stdout, stderr = await process.communicate() # wait for process to finish
         log = ""
         if stdout:
-            log += f"[stdout]\n{stdout.decode()}\n"
+            log += f"[stdout]\n{stdout.decode()}\n" # capture standard output
         if stderr:
-            log += f"[stderr]\n{stderr.decode()}\n"
+            log += f"[stderr]\n{stderr.decode()}\n" # capture error output
         if process.returncode != 0:
-            raise RuntimeError(
-                f"Command failed with code {process.returncode}. Log: {log}")
+            raise RuntimeError(f"Command failed with code {process.returncode}. Log: {log}")
         return log
-    return asyncio.run(run_cmd())
+    return asyncio.run(run_cmd()) # run async function in sync context
 
-# --- PreviewConversionWorker ---
-
-
-class PreviewConversionWorker(QThread):
-    conversionFinished = Signal(str)
+class PreviewConversionWorker(QThread): # worker thread for short preview conversion of videos
+    conversionFinished = Signal(str) # signal emitted when conversion is done
 
     def __init__(self, input_file, output_file, use_gpu=False):
         super().__init__()
-        self.input_file = input_file
-        self.output_file = output_file
-        self.use_gpu = use_gpu
+        self.input_file = input_file # path to input file
+        self.output_file = output_file # path for converted preview
+        self.use_gpu = use_gpu # flag to enable GPU acceleration
+
+    def run(self): # preview file conversion
+        ffmpeg_path = get_ffmpeg_path()
+        cmd = [ffmpeg_path, "-y"] #  start ffmpeg with overwrite flag
+        if self.use_gpu: # if gpu accel enabled
+            gpu_flags = ["-hwaccel", "cuda", "-hwaccel_output_format", "nv12"]
+            cmd.extend(gpu_flags)
+        cmd.extend([ # build ffmpeg command
+            "-i", self.input_file,
+            "-t", "30",
+            "-c:v", "libvpx-vp9", "-crf", "30", "-b:v", "500k",
+            "-c:a", "libvorbis",
+            "-f", "webm",
+            self.output_file
+        ])
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       creationflags=subprocess.CREATE_NO_WINDOW)
+        self.conversionFinished.emit(self.output_file) # signal ffmpeg process was finished
 
 
-def run(self):
-    ffmpeg_path = get_ffmpeg_path()
-    cmd = [ffmpeg_path, "-y"]
-    if self.use_gpu:
-        gpu_flags = ["-hwaccel", "cuda", "-hwaccel_output_format", "nv12"]
-        cmd.extend(gpu_flags)
-    cmd.extend([
-        "-i", self.input_file,
-        "-t", "30",
-        "-c:v", "libvpx", "-crf", "30", "-b:v", "500k",
-        "-c:a", "libvorbis",
-        "-f", "webm",
-        self.output_file
-    ])
-    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                   creationflags=subprocess.CREATE_NO_WINDOW)
-    self.conversionFinished.emit(self.output_file)
+ 
 
-# --- ConversionWorker ---
-
-
-class ConversionWorker(QThread):
-    conversionFinished = Signal(str, str)
-    conversionError = Signal(str)
-    logMessage = Signal(str)
+class ConversionWorker(QThread): # worker thread for handling video conversion with async operations
+    conversionFinished = Signal(str, str) # emitted signal when conversion completes
+    conversionError = Signal(str) # emit error
+    logMessage = Signal(str) # emit logs
 
     def __init__(self, input_file, output_file, extra_args=None, use_gpu=False, quality=100):
         super().__init__()
@@ -168,31 +151,36 @@ class ConversionWorker(QThread):
         self.extra_args = extra_args
         self.use_gpu = use_gpu
         self.quality = quality
-        self._stop_event = None
-        self._loop = None
+        self._stop_event = None # used for signaling cancellation
+        self._loop = None # asyncio loop event
 
-    def stop(self):
-        if self._stop_event and self._loop:
+    def stop(self): # safely trigger stop event from outside event loop
+        if self._stop_event and self._loop: 
             self._loop.call_soon_threadsafe(self._stop_event.set)
 
-    async def run_command_with_args(self, args: list) -> str:
+    async def run_command_with_args(self, args: list) -> str: # run fmmpeg async and handle cancellations
         ffmpeg_path = get_ffmpeg_path()
         cmd = [ffmpeg_path] + args
         print(f"Running command: {' '.join(cmd)}")
         from asyncio.subprocess import PIPE
-        process = await asyncio.create_subprocess_exec(*cmd, stdout=PIPE, stderr=PIPE)
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=PIPE,
+            stderr=PIPE,
+            creationflags=subprocess.CREATE_NO_WINDOW
+        )
         wait_tasks = [asyncio.create_task(process.communicate()),
                       asyncio.create_task(self._stop_event.wait())]
-        done, pending = await asyncio.wait(wait_tasks, return_when=asyncio.FIRST_COMPLETED)
-        if wait_tasks[1] in done:
+        done, pending = await asyncio.wait(wait_tasks, return_when=asyncio.FIRST_COMPLETED) # wait for either process completion or stop event
+        if wait_tasks[1] in done: # stop event trigger
             process.kill()
             await process.wait()
             for t in pending:
                 t.cancel()
-            if os.path.exists(self.output_file):
+            if os.path.exists(self.output_file): # clean up partial file
                 os.remove(self.output_file)
             raise asyncio.CancelledError("Conversion was stopped.")
-        else:
+        else: # process finished normally
             for t in pending:
                 t.cancel()
             stdout, stderr = wait_tasks[0].result()
@@ -206,18 +194,15 @@ class ConversionWorker(QThread):
                     f"Conversion failed for {self.input_file} (return code {process.returncode}). Log: {log}")
             return log
 
-    async def do_conversion(self):
-        import os
+    async def do_conversion(self): # handle different file types and prepare ffmpeg argument
         from converter import run_ffmpeg, get_input_bitrate, convert_file
         ext = os.path.splitext(self.output_file)[1].lower()
         log = ""
-        if ext == '.gif':
+        if ext == '.gif': # convert GIF with palette generation
             desired_fps = 30 if self.quality >= 80 else 10
-            palette_file = os.path.join(
-                OUTPUT_FOLDER, f"palette_temp_{uuid.uuid4().hex}.png")
-            # Ensure the directory exists (fix for installed app)
+            palette_file = os.path.join(OUTPUT_FOLDER, f"palette_temp_{uuid.uuid4().hex}.png")
             os.makedirs(os.path.dirname(palette_file), exist_ok=True)
-            try:
+            try: # generate color palette for GIF
                 palette_args = ["-y", "-i", self.input_file, "-vf",
                                 f"fps={desired_fps},scale=320:-1:flags=lanczos,palettegen",
                                 "-frames:v", "1", palette_file]
@@ -225,15 +210,15 @@ class ConversionWorker(QThread):
                 if ret != 0:
                     raise RuntimeError("Palette generation for GIF failed.")
                 gif_args = ["-y", "-i", self.input_file, "-i", palette_file, "-filter_complex",
-                            f"fps={desired_fps},scale=320:-1:flags=lanczos[x];[x][1:v]paletteuse", self.output_file]
+                            f"fps={desired_fps},scale=320:-1:flags=lanczos[x];[x][1:v]paletteuse", self.output_file] # apply palette for GIF
                 log = await self.run_command_with_args(gif_args)
-            finally:
+            finally: 
                 if os.path.exists(palette_file):
                     try:
-                        os.remove(palette_file)
+                        os.remove(palette_file) # cleanup temp palette file
                     except Exception:
                         pass
-        elif ext in ['.mp4', '.webm', '.mkv']:
+        elif ext in ['.mp4', '.webm', '.mkv']: # handle video formats
             input_bitrate = get_input_bitrate(self.input_file)
             bitrate_arg = None
             target_bitrate_k = None
@@ -242,8 +227,7 @@ class ConversionWorker(QThread):
                 target_bitrate_k = target_bitrate // 1000
                 bitrate_arg = f"{target_bitrate_k}k"
             if self.extra_args is None:
-                if ext == ".webm":
-                    # Use VP9 settings optimized for speed while retaining quality.
+                if ext == ".webm":  # use VP9 settings since webm doesnt support GPU acceleration
                     base_extra_args = [
                         "-pix_fmt", "yuv420p", "-r", "60",
                         "-c:v", "libvpx-vp9", "-quality", "good", "-cpu-used", "4",
@@ -257,8 +241,7 @@ class ConversionWorker(QThread):
                     ]
             else:
                 base_extra_args = self.extra_args.copy()
-            # For non-GPU conversion at 100% quality (except for webm, which uses its optimized defaults)
-            if not self.use_gpu and self.quality == 100 and ext != ".webm":
+            if not self.use_gpu and self.quality == 100 and ext != ".webm": # adjust settings for quality/GPU usage
                 if "-crf" in base_extra_args:
                     idx = base_extra_args.index("-crf")
                     del base_extra_args[idx:idx+2]
@@ -300,13 +283,12 @@ class ConversionWorker(QThread):
                         base_extra_args += ["-qp", "18"]
             from converter import convert_file
             log = await convert_file(self.input_file, self.output_file, base_extra_args, use_gpu=self.use_gpu, stop_event=self._stop_event)
-        else:
+        else: # for unsupported extensions just use extra_args
             from converter import convert_file
             log = await convert_file(self.input_file, self.output_file, self.extra_args, stop_event=self._stop_event)
         return log
 
-    def run(self):
-        import asyncio
+    def run(self): # entry point for when thread starts
         self._stop_event = asyncio.Event()
         loop = asyncio.new_event_loop()
         self._loop = loop
@@ -325,42 +307,38 @@ class ConversionWorker(QThread):
         finally:
             loop.close()
 
-# --- MainWindow ---
-
-
-class MainWindow(QMainWindow):
+class MainWindow(QMainWindow): # main app window
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Vidium")
         self.resize(800, 600)
         
-        if getattr(sys, 'frozen', False):
+        if getattr(sys, 'frozen', False): # handle app icon path based on executable or dev environment
             base_path = os.path.dirname(sys.executable)
+            icon_path = os.path.join(base_path, "_internal", "vicon.ico")
         else:
             base_path = os.path.abspath(".")
-            
-        icon_path = os.path.join(base_path, "_internal", "vicon.ico")
+            icon_path = os.path.join(base_path, "vicon.ico")
         self.setWindowIcon(QIcon(icon_path))
         self.setStatusBar(QStatusBar())
-        self.current_index = 0
+        self.current_index = 0 # initialize state variables 
         self.overall_progress = 0.0
         self.settings = QSettings("FBB", "VidiumConverter")
         self.conversion_aborted = False
         self.conversion_active = False
-        self.worker = None
+        self.worker = None # worker references for background tasks
         self.download_worker = None
         self.download_conversion_worker = None
         self.preview_conversion_worker = None
         self.trim_worker = None
         self.gpu_checkbox = QCheckBox("Use GPU (Very Fast)")
-        # New attribute to store the intermediate trimmed file when using Trim & Convert mode
         self.intermediate_file = None
-        self.initUI()
-        self.setAcceptDrops(True)
+        self.initUI() # build UI
+        self.setAcceptDrops(True) # enable drag and drop
         self.init_drop_overlay()
         self.video_widget.installEventFilter(self)
 
-    def eventFilter(self, obj, event):
+    def eventFilter(self, obj, event): 
         if obj == self.video_widget and self.conversion_active:
             if event.type() in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease, QEvent.MouseButtonDblClick):
                 return True
@@ -373,22 +351,17 @@ class MainWindow(QMainWindow):
         self.tab_widget = QTabWidget()
         self.convert_tab = QWidget()
         convert_layout = QVBoxLayout(self.convert_tab)
-        # --- Top area: Files and Preview ---
         top_layout = QHBoxLayout()
         files_group = QGroupBox("Files")
         files_layout = QVBoxLayout(files_group)
         self.files_tabwidget = QTabWidget()
-        # Input Tab
         input_tab = QWidget()
         input_tab_layout = QVBoxLayout(input_tab)
-        self.input_list = PlaceholderListWidget(
-            "Add, or Drag and Drop in Files")
+        self.input_list = PlaceholderListWidget("Add, or Drag and Drop in Files")
         self.input_list.setMinimumHeight(200)
-        self.input_list.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.input_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.input_list.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.input_list.customContextMenuRequested.connect(
-            self.input_list_context_menu)
+        self.input_list.customContextMenuRequested.connect(self.input_list_context_menu)
         self.input_list.currentItemChanged.connect(self.preview_selected_file)
         input_tab_layout.addWidget(self.input_list)
         input_buttons_layout = QHBoxLayout()
@@ -403,21 +376,17 @@ class MainWindow(QMainWindow):
         input_buttons_layout.addStretch()
         input_tab_layout.addLayout(input_buttons_layout)
         self.files_tabwidget.addTab(input_tab, "Input")
-        # Output Tab
         output_tab = QWidget()
         output_tab_layout = QVBoxLayout(output_tab)
-        self.output_list = PlaceholderListWidget(
-            "Output files will appear here")
+        self.output_list = PlaceholderListWidget("Output files will appear here")
         self.output_list.setMinimumHeight(200)
-        self.output_list.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.output_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.output_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.output_list.currentItemChanged.connect(self.preview_selected_file)
         output_tab_layout.addWidget(self.output_list)
         self.files_tabwidget.addTab(output_tab, "Output")
         files_layout.addWidget(self.files_tabwidget)
         top_layout.addWidget(files_group)
-        # Preview Group
         preview_group = QGroupBox("Preview")
         preview_layout = QVBoxLayout(preview_group)
         self.video_widget = QVideoWidget()
@@ -431,8 +400,7 @@ class MainWindow(QMainWindow):
         self.video_slider = ClickableSlider(Qt.Horizontal)
         preview_layout.addWidget(self.video_slider)
         self.media_player.positionChanged.connect(self.video_slider.setValue)
-        self.media_player.durationChanged.connect(
-            lambda d: self.video_slider.setRange(0, d))
+        self.media_player.durationChanged.connect(lambda d: self.video_slider.setRange(0, d))
         self.video_slider.sliderMoved.connect(self.media_player.setPosition)
         video_controls_layout = QHBoxLayout()
         self.toggle_button = QPushButton()
@@ -447,13 +415,11 @@ class MainWindow(QMainWindow):
         self.volume_slider.setRange(0, 100)
         self.volume_slider.setValue(50)
         self.volume_slider.setFixedWidth(100)
-        self.volume_slider.valueChanged.connect(
-            lambda val: self.audio_output.setVolume(val/100.0))
+        self.volume_slider.valueChanged.connect(lambda val: self.audio_output.setVolume(val/100.0))
         video_controls_layout.addWidget(self.volume_slider)
         preview_layout.addLayout(video_controls_layout)
         top_layout.addWidget(preview_group)
         convert_layout.addLayout(top_layout)
-        # Output Folder area (Convert Tab)
         out_addr_layout = QHBoxLayout()
         out_addr_layout.setContentsMargins(0, 0, 0, 0)
         out_addr_layout.setSpacing(0)
@@ -463,13 +429,11 @@ class MainWindow(QMainWindow):
         out_addr_layout.addWidget(out_folder_label)
         out_addr_layout.addSpacing(10)
         self.output_folder_edit = QLineEdit()
-        default_folder = self.settings.value(
-            "default_output_folder", OUTPUT_FOLDER)
+        default_folder = self.settings.value("default_output_folder", OUTPUT_FOLDER)
         self.output_folder_edit.setText(default_folder)
         self.output_folder_edit.setFixedWidth(300)
         out_addr_layout.addWidget(self.output_folder_edit)
         convert_layout.addLayout(out_addr_layout)
-        # Buttons below folder (Convert Tab)
         out_buttons_layout = QHBoxLayout()
         out_buttons_layout.setAlignment(Qt.AlignLeft)
         self.output_browse_button = QPushButton("Browse")
@@ -477,17 +441,14 @@ class MainWindow(QMainWindow):
         self.goto_folder_button = QPushButton("Go To Folder")
         out_buttons_layout.addWidget(self.goto_folder_button)
         self.default_checkbox = QCheckBox("Default")
-        default_checked = self.settings.value(
-            "default_checked", True, type=bool)
+        default_checked = self.settings.value("default_checked", True, type=bool)
         self.default_checkbox.setChecked(default_checked)
         out_buttons_layout.addWidget(self.default_checkbox)
         out_buttons_layout.addStretch()
         convert_layout.addLayout(out_buttons_layout)
         self.output_browse_button.clicked.connect(self.browse_output_folder)
         self.goto_folder_button.clicked.connect(self.goto_output_folder)
-        self.default_checkbox.stateChanged.connect(
-            self.default_checkbox_changed)
-        # Conversion Mode Dropdown
+        self.default_checkbox.stateChanged.connect(self.default_checkbox_changed)
         mode_layout = QHBoxLayout()
         mode_layout.setContentsMargins(0, 0, 0, 0)
         mode_layout.setSpacing(0)
@@ -497,13 +458,10 @@ class MainWindow(QMainWindow):
         mode_layout.addWidget(mode_label)
         mode_layout.addSpacing(10)
         self.convert_mode_combo = QComboBox()
-        self.convert_mode_combo.addItems(
-            ["Convert Only", "Trim Only", "Trim & Convert"])
-        self.convert_mode_combo.currentIndexChanged.connect(
-            self.convert_mode_changed)
+        self.convert_mode_combo.addItems(["Convert Only", "Trim Only", "Trim & Convert"])
+        self.convert_mode_combo.currentIndexChanged.connect(self.convert_mode_changed)
         mode_layout.addWidget(self.convert_mode_combo)
         convert_layout.addLayout(mode_layout)
-        # Output Format Dropdown
         self.output_format_widget = QWidget()
         output_format_layout = QHBoxLayout(self.output_format_widget)
         output_format_layout.setContentsMargins(0, 0, 0, 0)
@@ -517,7 +475,6 @@ class MainWindow(QMainWindow):
         self.populate_output_format_combo()
         output_format_layout.addWidget(self.output_format_combo)
         convert_layout.addWidget(self.output_format_widget)
-        # Trim Time UI
         self.convert_trim_widget = QWidget()
         self.convert_trim_widget.setContentsMargins(0, 0, 0, 0)
         convert_trim_v_layout = QVBoxLayout(self.convert_trim_widget)
@@ -530,8 +487,7 @@ class MainWindow(QMainWindow):
         self.convert_trim_label = QLabel("Trim Range:")
         self.convert_trim_label.setContentsMargins(0, 0, 0, 0)
         self.convert_trim_label.setStyleSheet("margin: 0px; padding: 0px;")
-        self.convert_trim_label.setSizePolicy(
-            QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.convert_trim_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         convert_trim_h_layout.addWidget(self.convert_trim_label)
         time_default = "00:00:00:00"
         self.convert_trim_start_edit = FixedTimeLineEdit()
@@ -540,21 +496,18 @@ class MainWindow(QMainWindow):
         self.convert_trim_to_label = QLabel("to")
         self.convert_trim_to_label.setContentsMargins(0, 0, 0, 0)
         self.convert_trim_to_label.setStyleSheet("margin: 0px; padding: 0px;")
-        self.convert_trim_to_label.setSizePolicy(
-            QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.convert_trim_to_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         convert_trim_h_layout.addWidget(self.convert_trim_to_label)
         self.convert_trim_end_edit = FixedTimeLineEdit()
         self.convert_trim_end_edit.setText(time_default)
         convert_trim_h_layout.addWidget(self.convert_trim_end_edit)
         convert_trim_v_layout.addLayout(convert_trim_h_layout)
         self.convert_trim_format_label = QLabel("Format: HH:MM:SS:MS")
-        self.convert_trim_format_label.setStyleSheet(
-            "font-size: 8pt; color: gray; margin: 0px; padding: 0px;")
+        self.convert_trim_format_label.setStyleSheet("font-size: 8pt; color: gray; margin: 0px; padding: 0px;")
         self.convert_trim_format_label.setAlignment(Qt.AlignLeft)
         convert_trim_v_layout.addWidget(self.convert_trim_format_label)
         convert_layout.addWidget(self.convert_trim_widget)
         self.convert_trim_widget.hide()
-        # Quality Options
         quality_layout = QHBoxLayout()
         quality_layout.setContentsMargins(0, 0, 0, 0)
         quality_layout.setSpacing(0)
@@ -573,11 +526,9 @@ class MainWindow(QMainWindow):
         self.quality_slider.valueChanged.connect(self.update_quality_label)
         quality_layout.addWidget(self.quality_slider)
         self.quality_value_label = QLabel("100%")
-        self.quality_value_label.setSizePolicy(
-            QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.quality_value_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         quality_layout.addWidget(self.quality_value_label)
         convert_layout.addLayout(quality_layout)
-        # Convert and Stop Buttons
         button_layout = QHBoxLayout()
         button_layout.setContentsMargins(0, 0, 0, 0)
         button_layout.setSpacing(0)
@@ -598,7 +549,6 @@ class MainWindow(QMainWindow):
         button_layout.addWidget(self.stop_button)
         convert_layout.addLayout(button_layout)
         self.convert_button.clicked.connect(self.start_conversion_queue)
-        # Progress Section
         self.current_progress_label = QLabel("Current File Progress: 0%")
         convert_layout.addWidget(self.current_progress_label)
         self.current_progress_bar = QProgressBar()
@@ -616,10 +566,8 @@ class MainWindow(QMainWindow):
         self.overall_progress_bar.setFixedWidth(203)
         convert_layout.addWidget(self.overall_progress_bar)
         self.tab_widget.addTab(self.convert_tab, "Convert")
-        # --- Download Tab modifications ---
         self.download_tab = QWidget()
         download_layout = QVBoxLayout(self.download_tab)
-        # Video URL
         video_url_layout = QHBoxLayout()
         video_url_label = QLabel("Video URL:")
         video_url_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
@@ -628,61 +576,46 @@ class MainWindow(QMainWindow):
         video_url_layout.addWidget(video_url_label)
         video_url_layout.addWidget(self.video_url_edit)
         download_layout.addLayout(video_url_layout)
-        # Download Folder
         download_folder_layout = QHBoxLayout()
         download_folder_layout.setAlignment(Qt.AlignLeft)
         download_folder_label = QLabel("Download Folder:")
-        download_folder_label.setSizePolicy(
-            QSizePolicy.Fixed, QSizePolicy.Fixed)
+        download_folder_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.download_folder_edit = QLineEdit()
-        DEFAULT_DOWNLOAD_FOLDER = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "Downloads")
-        default_download_folder = self.settings.value(
-            "default_download_folder", DEFAULT_DOWNLOAD_FOLDER)
+        DEFAULT_DOWNLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Downloads")
+        default_download_folder = self.settings.value("default_download_folder", DEFAULT_DOWNLOAD_FOLDER)
         self.download_folder_edit.setText(default_download_folder)
         self.download_folder_edit.setFixedWidth(300)
         download_folder_layout.addWidget(download_folder_label)
         download_folder_layout.addWidget(self.download_folder_edit)
         download_layout.addLayout(download_folder_layout)
-        # Browse, Go To Folder, Default for Download Folder
         download_folder_buttons_layout = QHBoxLayout()
         self.download_browse_button = QPushButton("Browse")
         self.download_goto_button = QPushButton("Go To Folder")
         self.download_default_checkbox = QCheckBox("Default")
-        default_download_checked = self.settings.value(
-            "default_download_checked", True, type=bool)
+        default_download_checked = self.settings.value("default_download_checked", True, type=bool)
         self.download_default_checkbox.setChecked(default_download_checked)
         download_folder_buttons_layout.addWidget(self.download_browse_button)
         download_folder_buttons_layout.addWidget(self.download_goto_button)
-        download_folder_buttons_layout.addWidget(
-            self.download_default_checkbox)
+        download_folder_buttons_layout.addWidget(self.download_default_checkbox)
         download_folder_buttons_layout.addStretch()
         download_layout.addLayout(download_folder_buttons_layout)
-        # Download Mode Dropdown
         download_mode_layout = QHBoxLayout()
         download_mode_layout.setAlignment(Qt.AlignLeft)
         self.download_mode_combo = QComboBox()
-        self.download_mode_combo.addItems(
-            ["Download Only", "Download & Convert", "Download & Trim", "Download & Convert & Trim"])
-        self.download_mode_combo.currentIndexChanged.connect(
-            self.download_mode_changed)
+        self.download_mode_combo.addItems(["Download Only", "Download & Convert", "Download & Trim", "Download & Convert & Trim"])
+        self.download_mode_combo.currentIndexChanged.connect(self.download_mode_changed)
         download_mode_layout.addWidget(self.download_mode_combo)
         download_layout.addLayout(download_mode_layout)
-        # Conversion Output Format Dropdown for Download Tab
         self.download_output_format_layout = QHBoxLayout()
         self.download_output_format_layout.setAlignment(Qt.AlignLeft)
         download_output_format_label = QLabel("Output Format:")
-        self.download_output_format_layout.addWidget(
-            download_output_format_label)
+        self.download_output_format_layout.addWidget(download_output_format_label)
         self.download_output_format_combo = QComboBox()
         self.populate_output_format_combo(self.download_output_format_combo)
-        self.download_output_format_layout.addWidget(
-            self.download_output_format_combo)
+        self.download_output_format_layout.addWidget(self.download_output_format_combo)
         download_layout.addLayout(self.download_output_format_layout)
         for i in range(self.download_output_format_layout.count()):
-            self.download_output_format_layout.itemAt(
-                i).widget().setVisible(False)
-        # Trim Time UI for Download Tab
+            self.download_output_format_layout.itemAt(i).widget().setVisible(False)
         self.trim_widget = QWidget()
         self.trim_widget.setContentsMargins(0, 0, 0, 0)
         trim_v_layout = QVBoxLayout(self.trim_widget)
@@ -711,18 +644,15 @@ class MainWindow(QMainWindow):
         trim_h_layout.addWidget(self.trim_end_edit)
         trim_v_layout.addLayout(trim_h_layout)
         self.trim_format_label = QLabel("Format: HH:MM:SS:MS")
-        self.trim_format_label.setStyleSheet(
-            "font-size: 8pt; color: gray; margin: 0px; padding: 0px;")
+        self.trim_format_label.setStyleSheet("font-size: 8pt; color: gray; margin: 0px; padding: 0px;")
         self.trim_format_label.setAlignment(Qt.AlignLeft)
         trim_v_layout.addWidget(self.trim_format_label)
         download_layout.addWidget(self.trim_widget)
         self.trim_widget.hide()
-        # Download Button
         self.download_button = QPushButton("Download")
         self.download_button.setFixedSize(120, 60)
         download_layout.addWidget(
             self.download_button, alignment=Qt.AlignCenter)
-        # Download Progress
         self.download_progress_label = QLabel("Download Progress: 0%")
         download_layout.addWidget(self.download_progress_label)
         self.download_progress_bar = QProgressBar()
@@ -732,11 +662,9 @@ class MainWindow(QMainWindow):
         download_layout.addWidget(self.download_progress_bar)
         self.tab_widget.addTab(self.download_tab, "Download")
         main_layout.addWidget(self.tab_widget)
-        # --- Console Log and GPU Checkbox ---
         self.log_text_edit = QPlainTextEdit()
         self.log_text_edit.setReadOnly(True)
-        self.log_text_edit.setPlaceholderText(
-            "Conversion log output will appear here...")
+        self.log_text_edit.setPlaceholderText("Conversion log output will appear here...")
         self.log_text_edit.setLineWrapMode(QPlainTextEdit.WidgetWidth)
         self.log_text_edit.setFixedHeight(150)
         self.log_text_edit.setFixedWidth(406)
@@ -744,26 +672,21 @@ class MainWindow(QMainWindow):
         console_layout.addWidget(self.log_text_edit)
         console_layout.addWidget(self.gpu_checkbox, alignment=Qt.AlignTop)
         main_layout.addLayout(console_layout)
-        # Conversion Queue and Progress (Convert Tab)
         self.conversion_queue = []
         self.total_files = 0
         self.current_index = 0
         self.file_timer = QTimer(self)
         self.file_timer.timeout.connect(self.update_current_progress)
         self.current_file_progress = 0
-        # Connect download tab buttons
-        self.download_browse_button.clicked.connect(
-            self.browse_download_folder)
-        self.download_default_checkbox.stateChanged.connect(
-            self.download_default_checkbox_changed)
+        self.download_browse_button.clicked.connect(self.browse_download_folder)
+        self.download_default_checkbox.stateChanged.connect(self.download_default_checkbox_changed)
         self.download_goto_button.clicked.connect(self.goto_download_folder)
         self.download_button.clicked.connect(self.start_download)
 
     def init_drop_overlay(self):
         self.drop_overlay = QWidget(self)
         self.drop_overlay.setGeometry(self.rect())
-        self.drop_overlay.setStyleSheet(
-            "background-color: rgba(0, 0, 0, 0.2);")
+        self.drop_overlay.setStyleSheet("background-color: rgba(0, 0, 0, 0.2);")
         self.drop_overlay.hide()
         self.overlay_label = QLabel("Drop Files Here", self.drop_overlay)
         self.overlay_label.setStyleSheet("color: white; font-size: 24pt;")
@@ -774,7 +697,6 @@ class MainWindow(QMainWindow):
     def populate_output_format_combo(self, combo=None):
         if combo is None:
             combo = self.output_format_combo
-        from PySide6.QtGui import QStandardItemModel, QStandardItem, QFont
         model = QStandardItemModel()
         bold_font = QFont()
         bold_font.setBold(True)
@@ -933,12 +855,10 @@ class MainWindow(QMainWindow):
         for i in range(count):
             input_path = self.input_list.item(i).text()
             base = os.path.splitext(os.path.basename(input_path))[0]
-            selected_format = self.output_format_combo.currentText(
-            ).strip() if self.output_format_combo.count() > 0 else "mp4"
+            selected_format = self.output_format_combo.currentText().strip() if self.output_format_combo.count() > 0 else "mp4"
             if selected_format.endswith(":"):
                 selected_format = "mp4"
-            output_path = os.path.join(
-                out_folder, base + "." + selected_format)
+            output_path = os.path.join(out_folder, base + "." + selected_format)
             self.conversion_queue.append((input_path, output_path))
         self.total_files = len(self.conversion_queue)
         self.current_index = 0
@@ -962,10 +882,8 @@ class MainWindow(QMainWindow):
         self.update_progress_labels()
 
     def update_progress_labels(self):
-        self.current_progress_label.setText(
-            f"Current File Progress: {self.current_file_progress}%")
-        overall_percent = int(
-            (self.current_index / self.total_files)*100) if self.total_files > 0 else 100
+        self.current_progress_label.setText(f"Current File Progress: {self.current_file_progress}%")
+        overall_percent = int((self.current_index / self.total_files)*100) if self.total_files > 0 else 100
         self.overall_progress_label.setText(
             f"Overall Progress: {overall_percent}%")
 
@@ -989,16 +907,13 @@ class MainWindow(QMainWindow):
         if self.current_index < self.total_files:
             mode = self.convert_mode_combo.currentText()
             input_file, output_file = self.conversion_queue[self.current_index]
-            # Only perform the "skip conversion" check for Convert Only mode.
             if mode == "Convert Only":
                 desired_format = self.get_selected_format().lower()
                 if desired_format.endswith(":"):
                     desired_format = "mp4"
                 input_ext = os.path.splitext(input_file)[1].lower()
                 if input_ext == "." + desired_format:
-                    self.append_log(
-                        f"Skipping conversion for {input_file} as it is already in the desired format.")
-                    from PySide6.QtWidgets import QListWidgetItem
+                    self.append_log(f"Skipping conversion for {input_file} as it is already in the desired format.")
                     item = QListWidgetItem(os.path.basename(input_file))
                     item.setData(Qt.UserRole, input_file)
                     self.output_list.addItem(item)
@@ -1033,7 +948,6 @@ class MainWindow(QMainWindow):
                 self.append_log("Starting trimming for file: " + input_file)
                 self.media_player.stop()
                 use_gpu_flag = self.gpu_checkbox.isChecked()
-                # For both Trim Only and Trim & Convert, use stream copy trimming (copy_mode=True)
                 copy_mode_flag = True
                 self.trim_worker = TrimWorker(input_file, self.convert_trim_start_edit.text(),
                                               self.convert_trim_end_edit.text(), use_gpu=use_gpu_flag, delete_original=False, output_folder=self.output_folder_edit.text(), copy_mode=copy_mode_flag)
@@ -1042,10 +956,8 @@ class MainWindow(QMainWindow):
                 self.trim_worker.start()
             else:
                 from converter import convert_file
-                self.worker = ConversionWorker(
-                    input_file, output_file, extra_args=None, use_gpu=False, quality=self.quality_slider.value())
-                self.worker.conversionFinished.connect(
-                    self.file_conversion_finished)
+                self.worker = ConversionWorker(input_file, output_file, extra_args=None, use_gpu=False, quality=self.quality_slider.value())
+                self.worker.conversionFinished.connect(self.file_conversion_finished)
                 self.worker.conversionError.connect(self.file_conversion_error)
                 self.worker.logMessage.connect(self.append_log)
                 self.worker.start()
@@ -1069,13 +981,10 @@ class MainWindow(QMainWindow):
             try:
                 if os.path.exists(self.intermediate_file):
                     os.remove(self.intermediate_file)
-                    self.append_log(
-                        f"Removed intermediate trimmed file: {self.intermediate_file}")
+                    self.append_log(f"Removed intermediate trimmed file: {self.intermediate_file}")
             except Exception as e:
-                self.append_log(
-                    f"Could not remove intermediate trimmed file: {e}")
+                self.append_log(f"Could not remove intermediate trimmed file: {e}")
             self.intermediate_file = None
-        from PySide6.QtWidgets import QListWidgetItem
         item = QListWidgetItem(os.path.basename(output_file))
         item.setData(Qt.UserRole, output_file)
         self.output_list.addItem(item)
@@ -1089,8 +998,9 @@ class MainWindow(QMainWindow):
         self.file_timer.stop()
         self.append_log(f"Error: {error_message}")
         if not self.conversion_aborted:
-            if self.input_list.count() > 0:
-                self.input_list.takeItem(0)
+            # Remove the item corresponding to the current index to avoid desync
+            if 0 <= self.current_index < self.input_list.count():
+                self.input_list.takeItem(self.current_index)
             self.current_index += 1
             overall = int((self.current_index / self.total_files)*100)
             self.overall_progress_bar.setValue(overall)
@@ -1111,8 +1021,7 @@ class MainWindow(QMainWindow):
         pass
 
     def show_about(self):
-        self.statusBar().showMessage(
-            "Vidium Video Converter v1.0\nBuilt with PySide6 and bundled FFmpeg.")
+        self.statusBar().showMessage("Vidium Video Converter v1.0\nBuilt with PySide6 and bundled FFmpeg.")
 
     def convert_mode_changed(self):
         mode = self.convert_mode_combo.currentText()
@@ -1128,8 +1037,7 @@ class MainWindow(QMainWindow):
 
     def download_mode_changed(self, index):
         mode = self.download_mode_combo.currentText()
-        visible_format = mode in [
-            "Download & Convert", "Download & Convert & Trim"]
+        visible_format = mode in ["Download & Convert", "Download & Convert & Trim"]
         for i in range(self.download_output_format_layout.count()):
             self.download_output_format_layout.itemAt(
                 i).widget().setVisible(visible_format)
@@ -1149,7 +1057,6 @@ class MainWindow(QMainWindow):
                 selected_format = "mp4"
             base = os.path.splitext(trimmed_file)[0]
             new_file = base + "." + selected_format
-            # Avoid in-place conversion if the trimmed file already has the same extension.
             if os.path.splitext(trimmed_file)[1].lower() == "." + selected_format.lower():
                 new_file = base + "_converted." + selected_format
             self.append_log(
@@ -1158,15 +1065,12 @@ class MainWindow(QMainWindow):
             if selected_format.lower() == "webm":
                 use_gpu_flag = False
             from converter import convert_file
-            self.worker = ConversionWorker(
-                trimmed_file, new_file, extra_args=None, use_gpu=use_gpu_flag, quality=self.quality_slider.value())
-            self.worker.conversionFinished.connect(
-                self.file_conversion_finished)
+            self.worker = ConversionWorker(trimmed_file, new_file, extra_args=None, use_gpu=use_gpu_flag, quality=self.quality_slider.value())
+            self.worker.conversionFinished.connect(self.file_conversion_finished)
             self.worker.conversionError.connect(self.file_conversion_error)
             self.worker.logMessage.connect(self.append_log)
             self.worker.start()
         else:
-            from PySide6.QtWidgets import QListWidgetItem
             item = QListWidgetItem(os.path.basename(trimmed_file))
             item.setData(Qt.UserRole, trimmed_file)
             self.output_list.addItem(item)
@@ -1209,7 +1113,6 @@ class MainWindow(QMainWindow):
             self.download_conversion_worker.logMessage.connect(self.append_log)
             self.download_conversion_worker.start()
         elif mode == "Download & Trim":
-            from PySide6.QtWidgets import QListWidgetItem
             item = QListWidgetItem(os.path.basename(trimmed_file))
             item.setData(Qt.UserRole, trimmed_file)
             self.output_list.addItem(item)
@@ -1242,7 +1145,6 @@ class MainWindow(QMainWindow):
                     self.append_log(f"Removed original file: {original_file}")
                 except Exception as e:
                     self.append_log(f"Could not remove original file: {e}")
-            from PySide6.QtWidgets import QListWidgetItem
             item = QListWidgetItem(os.path.basename(output_file))
             item.setData(Qt.UserRole, output_file)
             self.output_list.addItem(item)
@@ -1261,7 +1163,6 @@ class MainWindow(QMainWindow):
                         f"Removed trimmed file: {original_trimmed_file}")
                 except Exception as e:
                     self.append_log(f"Could not remove trimmed file: {e}")
-            from PySide6.QtWidgets import QListWidgetItem
             item = QListWidgetItem(os.path.basename(output_file))
             item.setData(Qt.UserRole, output_file)
             self.output_list.addItem(item)
@@ -1314,13 +1215,11 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Download folder not found.")
 
     def download_default_checkbox_changed(self, state):
-        DEFAULT_DOWNLOAD_FOLDER = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "Downloads")
+        DEFAULT_DOWNLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Downloads")
         if state == Qt.Checked:
             self.download_folder_edit.setText(DEFAULT_DOWNLOAD_FOLDER)
             self.download_folder_edit.setReadOnly(True)
-            self.settings.setValue(
-                "default_download_folder", DEFAULT_DOWNLOAD_FOLDER)
+            self.settings.setValue("default_download_folder", DEFAULT_DOWNLOAD_FOLDER)
             self.settings.setValue("default_download_checked", True)
         else:
             self.download_folder_edit.setReadOnly(False)
@@ -1356,12 +1255,9 @@ class MainWindow(QMainWindow):
             selected_format = self.download_output_format_combo.currentText().strip()
             if selected_format.endswith(":"):
                 selected_format = "mp4"
-            # --- SKIP conversion if downloaded file is already in desired format ---
             download_ext = os.path.splitext(downloaded_file)[1].lower()
             if download_ext == "." + selected_format.lower():
-                self.append_log(
-                    f"Skipping conversion for {downloaded_file} as it is already in the desired format.")
-                from PySide6.QtWidgets import QListWidgetItem
+                self.append_log(f"Skipping conversion for {downloaded_file} as it is already in the desired format.")
                 item = QListWidgetItem(os.path.basename(downloaded_file))
                 item.setData(Qt.UserRole, downloaded_file)
                 self.output_list.addItem(item)
@@ -1374,8 +1270,7 @@ class MainWindow(QMainWindow):
                 return
             base = os.path.splitext(downloaded_file)[0]
             new_file = base + "." + selected_format
-            self.append_log(
-                f"Starting conversion of downloaded file to {selected_format}...")
+            self.append_log(f"Starting conversion of downloaded file to {selected_format}...")
             use_gpu_flag = self.gpu_checkbox.isChecked()
             if selected_format.lower() == "webm":
                 use_gpu_flag = False
@@ -1389,8 +1284,7 @@ class MainWindow(QMainWindow):
             self.download_conversion_worker.logMessage.connect(self.append_log)
             self.download_conversion_worker.start()
         elif mode == "Download & Convert & Trim":
-            self.append_log(
-                "Starting trimming of downloaded file (for conversion and trimming)...")
+            self.append_log("Starting trimming of downloaded file (for conversion and trimming)...")
             self.trim_worker = TrimWorker(downloaded_file, self.trim_start_edit.text(
             ), self.trim_end_edit.text(), use_gpu=self.gpu_checkbox.isChecked(), copy_mode=False)
             self.trim_worker.finished.connect(self.trim_finished)
@@ -1505,10 +1399,10 @@ if __name__ == "__main__":
     
     if getattr(sys, 'frozen', False):
         base_path = os.path.dirname(sys.executable)
+        icon_path = os.path.join(base_path, "_internal", "vicon.ico")
     else:
         base_path = os.path.abspath(".")
-        
-    icon_path = os.path.join(base_path, "_internal", "vicon.ico")
+        icon_path = os.path.join(base_path, "vicon.ico")
     app.setWindowIcon(QIcon(icon_path))
     window = MainWindow()
     window.show()

@@ -189,7 +189,7 @@ class TrimWorker(QThread):
                 if self.use_gpu:
                     if is_video_10bit(self.input_file):
                         gpu_flags = ["-hwaccel", "cuda",
-                                     "-hwaccel_output_format", "nv12"]
+                                     "-hwaccel_output_format", "p010le"]
                         encoder_args = ["-c:v", "hevc_nvenc", "-qp", "18", "-profile:v", "main10", "-pix_fmt", "p010le",
                                         "-b:v", f"{target_bitrate_k}k", "-maxrate", f"{target_bitrate_k}k",
                                         "-bufsize", f"{target_bitrate_k * 2}k"]
@@ -235,7 +235,8 @@ class TrimWorker(QThread):
                 except Exception as e:
                     self.error.emit(f"Failed to remove original file: {e}")
                     return
-            os.rename(temp_output, new_filepath)
+            import shutil
+            shutil.move(temp_output, new_filepath)
             self.finished.emit(
                 "Trimming completed successfully.", new_filepath)
         except Exception as e:

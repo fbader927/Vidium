@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+dist/
+build/
+wheelhouse/
+.tox/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+coverage.xml
+.coverage*
+htmlcov/
+
+# Virtual environments
+.env
+.venv/
+venv/
+ENV/
+env/
+
+# Platform/OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors/IDEs
+.vscode/
+.idea/
+*.code-workspace
+
+# Packaging (e.g., PyInstaller)
+*.spec
+
+# Logs
+*.log
+
+# Project-specific
+Downloads/
+Output/
+AGENT.MD
+michael.mp4
+
+

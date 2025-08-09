@@ -41,7 +41,7 @@ class DownloadWorker(QThread):
             # Include ffmpeg_location so yt_dlp can merge formats
             ydl_opts = {
                 'outtmpl': os.path.join(self.output_folder, '%(title).100s.%(ext)s'),
-                'format': 'bestvideo+bestaudio/best',
+                'format': 'bestvideo*+bestaudio/best',
                 'noplaylist': True,
                 'restrictfilenames': True,
                 'progress_hooks': [self.download_hook],
@@ -84,14 +84,23 @@ class DownloadWorker(QThread):
             self.error.emit(error_msg)
 
     def download_hook(self, d):
-        if d.get('status') == 'downloading':
+        # Track both media downloads (video+audio) and final merge as a single smooth 0..100
+        status = d.get('status')
+        if status == 'downloading':
             total = d.get('total_bytes') or d.get('total_bytes_estimate')
             downloaded = d.get('downloaded_bytes', 0)
             if total:
-                progress_percent = int(downloaded / total * 100)
-                self.progress.emit(progress_percent)
-        elif d.get('status') == 'finished':
-            self.progress.emit(100)
+                percent = int(downloaded / total * 100)
+                # If yt_dlp switches to the second stream, its counters restart. Clamp monotonically.
+                if not hasattr(self, '_last_progress'):
+                    self._last_progress = 0
+                percent = max(self._last_progress, percent)
+                self._last_progress = percent
+                self.progress.emit(percent)
+        elif status == 'finished':
+            # Close of a stream; hold at 99% until finalization
+            self._last_progress = 99
+            self.progress.emit(self._last_progress)
 
 
 def format_timestamp(time_str):

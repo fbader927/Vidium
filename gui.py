@@ -365,14 +365,13 @@ class ThreeSphereView(QWebEngineView if WEBENGINE_AVAILABLE else QWidget):
     #wrap { position:relative; width:100%; height:100%; background:#000; }
     #sphere { position:absolute; inset:0; will-change: transform; contain: strict; }
     #overlay { position:absolute; inset:0; pointer-events:none; }
-    .grid-lines .h, .grid-lines .v { position:absolute; background:rgba(50,50,50,0.45); }
-    .grid-lines .h { height:1px; left:0; right:0; }
-    .grid-lines .v { width:1px; top:0; bottom:0; }
+    /* Disable grid overlay entirely */
+    .grid-lines { display:none !important; }
     :root { --dockW: 35%; }
     #term { position:absolute; top:20px; bottom:20px; right:10px; width:calc(var(--dockW) - 20px); color:#00ffff; font-family:'Courier New', monospace; font-size:11px; line-height:1.25; overflow:hidden; opacity:0.85; }
     #termInner { position:absolute; left:0; right:0; bottom:-100%; display:block; will-change: transform; transform: translateZ(0); }
     .noiseLine { color:#00ffff; opacity:0.12; white-space:nowrap; }
-    .realLine { color:#00ffff; opacity:0.95; text-shadow:0 0 8px rgba(0,255,255,0.75); white-space:nowrap; }
+    .realLine { color:#00ffff; opacity:0.95; text-shadow:0 0 8px rgba(0,255,255,0.75); white-space:normal; word-wrap:break-word; overflow-wrap:anywhere; }
   </style>
 </head>
 <body>
@@ -412,7 +411,7 @@ class ThreeSphereView(QWebEngineView if WEBENGINE_AVAILABLE else QWidget):
 
     let progress = 0; // 0..100
     let offsetRatio = 0.0; // -0.5..0.5
-    function buildGrid(){ const overlay = document.getElementById('grid'); overlay.innerHTML=''; for(let i=1;i<10;i++){ const h=document.createElement('div'); h.className='h'; h.style.top=(i*10)+'%'; overlay.appendChild(h); const v=document.createElement('div'); v.className='v'; v.style.left=(i*10)+'%'; overlay.appendChild(v);} }
+    function buildGrid(){ const overlay = document.getElementById('grid'); if (overlay) overlay.innerHTML=''; }
     // Fixed-size canvas cap: never exceed half the window's smaller dimension
     function computeCanvasSize(w,h){
       const s = Math.min(w, h);
@@ -723,6 +722,7 @@ class MainWindow(QMainWindow): # main app window
         self.gpu_checkbox = QCheckBox("Use GPU (Very Fast)")
         try:
             self.gpu_checkbox.setChecked(self.settings.value("gpu_enabled", True, type=bool))
+            self.gpu_checkbox.setStyleSheet("color: #00FFFF;")
         except Exception:
             self.gpu_checkbox.setChecked(True)
         try:
@@ -740,9 +740,10 @@ class MainWindow(QMainWindow): # main app window
         self.crt_overlay.setGeometry(self.rect())
         self.crt_overlay.raise_()
         self.crt_overlay.show()
-        # Countdown header timer
-        self.countdown_secs = 24*3600 + 15*60 + 37
-        self._init_countdown_timer()
+        # Replace countdown with static iteration label
+        self.countdown_secs = None
+        if hasattr(self, 'time_label'):
+            self.time_label.setText("Iteration: 2V")
 
     def eventFilter(self, obj, event): 
         if hasattr(self, 'video_widget') and obj == self.video_widget and self.conversion_active:
@@ -762,9 +763,9 @@ class MainWindow(QMainWindow): # main app window
         hl.setSpacing(12)
         self.logo_label = QLabel("▶ VIDIUM")
         self.logo_label.setObjectName("Logo")
-        self.status_label = QLabel("SYSTEM STATUS: NORMAL")
+        self.status_label = QLabel("STATUS: IDLE")
         self.status_label.setObjectName("Status")
-        self.time_label = QLabel("T-MINUS 24:15:37")
+        self.time_label = QLabel("Iteration: 2V")
         self.time_label.setObjectName("Time")
         opacity = QGraphicsOpacityEffect(self.status_label)
         self.status_label.setGraphicsEffect(opacity)
@@ -839,8 +840,23 @@ class MainWindow(QMainWindow): # main app window
         self.input_list.currentItemChanged.connect(self.preview_selected_file)
         input_tab_layout.addWidget(self.input_list)
         btns = QHBoxLayout();
-        self.input_browse_button = QPushButton("Browse"); self.input_browse_button.clicked.connect(self.browse_input_files)
-        self.clear_all_button = QPushButton("Clear All"); self.clear_all_button.clicked.connect(self.clear_input_files)
+        self.input_browse_button = QPushButton("Browse"); self.input_browse_button.clicked.connect(self.browse_input_files); self.input_browse_button.setObjectName("ActionButton")
+        # Restore the stronger hover glow for file list actions
+        try:
+            self.input_browse_button.setStyleSheet(
+                "QPushButton{color:#00FFFF; border:1px solid #222; background: rgba(0,0,0,0.25); padding:6px 12px;}"
+                "QPushButton:hover{border-color:#00FFFF; background: rgba(0,255,255,0.12);}"
+            )
+        except Exception:
+            pass
+        self.clear_all_button = QPushButton("Clear All"); self.clear_all_button.clicked.connect(self.clear_input_files); self.clear_all_button.setObjectName("ActionButton")
+        try:
+            self.clear_all_button.setStyleSheet(
+                "QPushButton{color:#00FFFF; border:1px solid #222; background: rgba(0,0,0,0.25); padding:6px 12px;}"
+                "QPushButton:hover{border-color:#00FFFF; background: rgba(0,255,255,0.12);}"
+            )
+        except Exception:
+            pass
         btns.addWidget(self.input_browse_button); btns.addWidget(self.clear_all_button); btns.addStretch(1)
         input_tab_layout.addLayout(btns)
         self.files_tabwidget.addTab(input_tab, "Input")
@@ -855,7 +871,7 @@ class MainWindow(QMainWindow): # main app window
         # Controls rows (split into two lines to avoid crowding)
         # Row A: Mode + GPU
         controls_top = QWidget(); ctop = QHBoxLayout(controls_top); ctop.setContentsMargins(8,0,8,0)
-        self.convert_mode_combo = QComboBox(); self.convert_mode_combo.addItems(["Convert Only", "Trim Only", "Trim & Convert"]); self.convert_mode_combo.currentIndexChanged.connect(self.convert_mode_changed)
+        self.convert_mode_combo = QComboBox(); self.convert_mode_combo.setObjectName("ModeCombo"); self.convert_mode_combo.addItems(["Convert Only", "Trim Only", "Trim & Convert"]); self.convert_mode_combo.currentIndexChanged.connect(self.convert_mode_changed)
         try:
             self.convert_mode_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
             self.convert_mode_combo.setMinimumContentsLength(16)
@@ -871,7 +887,7 @@ class MainWindow(QMainWindow): # main app window
         cg.addWidget(controls_top, 10, 2, 1, 7)
 
         # Prepare output/quality widgets
-        self.output_format_combo = QComboBox(); self.populate_output_format_combo()
+        self.output_format_combo = QComboBox(); self.output_format_combo.setObjectName("OutputCombo"); self.populate_output_format_combo()
         try:
             self.output_format_combo.setMinimumWidth(120)
             self.output_format_combo.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
@@ -899,8 +915,8 @@ class MainWindow(QMainWindow): # main app window
         cg.addWidget(controls_mid, 11, 2, 1, 7)
 
         # Actions row: Convert / Stop centered
-        self.convert_button = QPushButton("Convert"); self.convert_button.clicked.connect(self.start_conversion_queue)
-        self.stop_button = QPushButton("Stop"); self.stop_button.clicked.connect(self.stop_conversion); self.stop_button.setEnabled(False)
+        self.convert_button = QPushButton("Convert"); self.convert_button.setObjectName("ActionButton"); self.convert_button.clicked.connect(self.start_conversion_queue)
+        self.stop_button = QPushButton("Stop"); self.stop_button.setObjectName("ActionButton"); self.stop_button.clicked.connect(self.stop_conversion); self.stop_button.setEnabled(False)
         actions_row = QWidget(); ar = QHBoxLayout(actions_row); ar.setContentsMargins(8,0,8,0)
         ar.addStretch(1)
         ar.addWidget(self.convert_button); ar.addWidget(self.stop_button)
@@ -925,26 +941,33 @@ class MainWindow(QMainWindow): # main app window
         # Keep trim row left of the progress area to prevent any overlay
         cg.addWidget(self.convert_trim_widget, 9, 2, 1, 7)
         # Output folder + buttons (top center)
-        folder_row = QWidget(); fr = QHBoxLayout(folder_row); fr.setContentsMargins(8,0,8,0)
-        fr.addWidget(QLabel("Output Folder:"))
+        folder_container = QWidget(); fc = QVBoxLayout(folder_container); fc.setContentsMargins(8,0,8,0); fc.setSpacing(2)
+        fr_top = QHBoxLayout(); fr_top.setContentsMargins(0,0,0,0)
+        fr_top.addWidget(QLabel("Output Folder:"))
+        self.output_browse_button = QPushButton("Browse"); self.output_browse_button.setObjectName("ActionButton"); self.output_browse_button.clicked.connect(self.browse_output_folder)
+        self.goto_folder_button = QPushButton("Go To Folder"); self.goto_folder_button.setObjectName("ActionButton"); self.goto_folder_button.clicked.connect(self.goto_output_folder)
+        fr_top.addWidget(self.output_browse_button); fr_top.addWidget(self.goto_folder_button); fr_top.addStretch(1)
+        fc.addLayout(fr_top)
+        fr_bottom = QHBoxLayout(); fr_bottom.setContentsMargins(0,0,0,0)
         self.output_folder_edit = QLineEdit(); self.output_folder_edit.setText(self.settings.value("default_output_folder", OUTPUT_FOLDER))
         try:
             self.output_folder_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         except Exception:
             pass
-        fr.addWidget(self.output_folder_edit, 1)
-        self.output_browse_button = QPushButton("Browse"); self.output_browse_button.clicked.connect(self.browse_output_folder)
-        self.goto_folder_button = QPushButton("Go To Folder"); self.goto_folder_button.clicked.connect(self.goto_output_folder)
+        fr_bottom.addWidget(self.output_folder_edit, 1)
         self.default_checkbox = QCheckBox("Default"); self.default_checkbox.setChecked(self.settings.value("default_checked", True, type=bool)); self.default_checkbox.stateChanged.connect(self.default_checkbox_changed)
-        fr.addWidget(self.output_browse_button); fr.addWidget(self.goto_folder_button); fr.addWidget(self.default_checkbox); fr.addStretch(1)
-        cg.addWidget(folder_row, 0, 3, 1, 7)
+        try:
+            self.default_checkbox.setStyleSheet("color: #00FFFF;")
+        except Exception:
+            pass
+        fr_bottom.addWidget(self.default_checkbox)
+        fc.addLayout(fr_bottom)
+        cg.addWidget(folder_container, 0, 3, 1, 7)
         # Progress (right area)
         progress_panel = QWidget(); pl = QVBoxLayout(progress_panel); pl.setContentsMargins(8,0,8,0)
-        self.current_progress_label = QLabel("Current File Progress: 0%")
-        self.current_progress_bar = QProgressBar(); self.current_progress_bar.setRange(0,100)
-        self.overall_progress_label = QLabel("Overall Progress: 0%")
+        self.overall_progress_label = QLabel("Progress: 0%")
         self.overall_progress_bar = QProgressBar(); self.overall_progress_bar.setRange(0,100)
-        pl.addWidget(self.current_progress_label); pl.addWidget(self.current_progress_bar); pl.addWidget(self.overall_progress_label); pl.addWidget(self.overall_progress_bar)
+        pl.addWidget(self.overall_progress_label); pl.addWidget(self.overall_progress_bar)
         # Anchor the progress panel to the top-right of the main content area
         cg.addWidget(progress_panel, 8, 8, 3, 3)
         # Right dock for Convert terminal
@@ -953,14 +976,28 @@ class MainWindow(QMainWindow): # main app window
         dock_layout_c = QVBoxLayout(self.convert_right_dock)
         dock_layout_c.setContentsMargins(6,6,6,6)
         dock_layout_c.setSpacing(6)
-        self.convert_terminal = QPlainTextEdit(); self.convert_terminal.setReadOnly(True); self.convert_terminal.setPlaceholderText("terminal // telemetry ..."); self.convert_terminal.setLineWrapMode(QPlainTextEdit.NoWrap)
-        self.convert_right_dock.setStyleSheet("background: rgba(0,0,0,0.18); border:1px solid #222;")
-        self.convert_terminal.setStyleSheet("background: transparent; color:#00FFFF;")
+        self.convert_terminal = QPlainTextEdit(); self.convert_terminal.setReadOnly(True); self.convert_terminal.setPlaceholderText("terminal // telemetry ..."); self.convert_terminal.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        # Make terminal area visually seamless with the scene (no boxed border)
+        self.convert_right_dock.setStyleSheet("background: transparent; border: none;")
+        self.convert_terminal.setStyleSheet(
+            """
+            QPlainTextEdit { background-color: transparent; color:#00FFFF; border: none; }
+            QPlainTextEdit QScrollBar:vertical { background-color: transparent; width: 11px; }
+            QPlainTextEdit QScrollBar::handle:vertical { background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 rgba(0,255,255,0.35), stop:1 rgba(0,160,160,0.45)); border:1px solid rgba(0,255,255,0.65); border-radius:5px; min-height:28px; }
+            QPlainTextEdit QScrollBar::add-line:vertical, QPlainTextEdit QScrollBar::sub-line:vertical { height: 0; background: transparent; }
+            QPlainTextEdit QScrollBar::add-page:vertical, QPlainTextEdit QScrollBar::sub-page:vertical { background-color: rgba(0,0,0,0.15); }
+            QPlainTextEdit QScrollBar:horizontal { background-color: transparent; height: 11px; }
+            QPlainTextEdit QScrollBar::handle:horizontal { background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 rgba(0,255,255,0.35), stop:1 rgba(0,160,160,0.45)); border:1px solid rgba(0,255,255,0.65); border-radius:5px; min-width:28px; }
+            QPlainTextEdit QScrollBar::add-line:horizontal, QPlainTextEdit QScrollBar::sub-line:horizontal { width: 0; background: transparent; }
+            QPlainTextEdit QScrollBar::add-page:horizontal, QPlainTextEdit QScrollBar::sub-page:horizontal { background-color: rgba(0,0,0,0.15); }
+            """
+        )
         dock_layout_c.addWidget(self.convert_terminal)
         # Wrap base + overlay so overlay is always above
-        # Shift sphere to the right side
+        # Center sphere between left pane and terminal by using a modest right offset
         if hasattr(self.sphere_view, "set_offset_ratio"):
-            self.sphere_view.set_offset_ratio(0.33)
+            # Slight shift only to account for reserved terminal width; visually centered
+            self.sphere_view.set_offset_ratio(0.15)
         convert_container = OverlayContainer(self.sphere_view, convert_overlay, parent=self.convert_tab)
         # Keep references for centering calculations
         self.convert_overlay = convert_overlay
@@ -1037,9 +1074,21 @@ class MainWindow(QMainWindow): # main app window
         dock_layout_d = QVBoxLayout(self.download_right_dock)
         dock_layout_d.setContentsMargins(6,6,6,6)
         dock_layout_d.setSpacing(6)
-        self.download_terminal = QPlainTextEdit(); self.download_terminal.setReadOnly(True); self.download_terminal.setPlaceholderText("download // telemetry ..."); self.download_terminal.setLineWrapMode(QPlainTextEdit.NoWrap)
-        self.download_right_dock.setStyleSheet("background: rgba(0,0,0,0.18); border:1px solid #222;")
-        self.download_terminal.setStyleSheet("background: transparent; color:#00FFFF;")
+        self.download_terminal = QPlainTextEdit(); self.download_terminal.setReadOnly(True); self.download_terminal.setPlaceholderText("download // telemetry ..."); self.download_terminal.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.download_right_dock.setStyleSheet("background: transparent; border: none;")
+        self.download_terminal.setStyleSheet(
+            """
+            QPlainTextEdit { background-color: transparent; color:#00FFFF; border: none; }
+            QPlainTextEdit QScrollBar:vertical { background-color: transparent; width: 11px; }
+            QPlainTextEdit QScrollBar::handle:vertical { background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 rgba(0,255,255,0.35), stop:1 rgba(0,160,160,0.45)); border:1px solid rgba(0,255,255,0.65); border-radius:5px; min-height:28px; }
+            QPlainTextEdit QScrollBar::add-line:vertical, QPlainTextEdit QScrollBar::sub-line:vertical { height: 0; background: transparent; }
+            QPlainTextEdit QScrollBar::add-page:vertical, QPlainTextEdit QScrollBar::sub-page:vertical { background-color: rgba(0,0,0,0.15); }
+            QPlainTextEdit QScrollBar:horizontal { background-color: transparent; height: 11px; }
+            QPlainTextEdit QScrollBar::handle:horizontal { background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 rgba(0,255,255,0.35), stop:1 rgba(0,160,160,0.45)); border:1px solid rgba(0,255,255,0.65); border-radius:5px; min-width:28px; }
+            QPlainTextEdit QScrollBar::add-line:horizontal, QPlainTextEdit QScrollBar::sub-line:horizontal { width: 0; background: transparent; }
+            QPlainTextEdit QScrollBar::add-page:horizontal, QPlainTextEdit QScrollBar::sub-page:horizontal { background-color: rgba(0,0,0,0.15); }
+            """
+        )
         dock_layout_d.addWidget(self.download_terminal)
         # Hide output format when mode is Download Only
         # Initialize visibility of download output format row when present
@@ -1092,20 +1141,13 @@ class MainWindow(QMainWindow): # main app window
         layout.addWidget(self.overlay_label, alignment=Qt.AlignCenter)
 
     def _init_countdown_timer(self):
-        self._countdown_timer = QTimer(self)
-        self._countdown_timer.timeout.connect(self._tick_countdown)
-        self._countdown_timer.start(1000)
+        # No-op: countdown removed in favor of static iteration text
+        pass
 
     def _tick_countdown(self):
-        if getattr(self, 'countdown_secs', None) is None:
-            return
-        if self.countdown_secs > 0:
-            self.countdown_secs -= 1
-        h = self.countdown_secs // 3600
-        m = (self.countdown_secs % 3600) // 60
-        s = self.countdown_secs % 60
-        if hasattr(self, 'time_label'):
-            self.time_label.setText(f"T-MINUS {h:02d}:{m:02d}:{s:02d}")
+        # No-op with static iteration text
+        if hasattr(self, 'time_label') and self.time_label.text() != "Iteration: 2V":
+            self.time_label.setText("Iteration: 2V")
 
     def apply_sci_fi_styles(self):
         self.setStyleSheet(
@@ -1114,21 +1156,21 @@ class MainWindow(QMainWindow): # main app window
             QGroupBox { border: 1px solid #333; background-color: rgba(20,20,20,0.7); margin-top: 10px; }
             QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 2px 6px; color: #FF4800; }
             #HeaderBar { border: 1px solid #333; background-color: rgba(0,0,0,0.5); }
-            #Logo { color: #FF4800; font-weight: bold; font-size: 18px; }
+            #Logo { color: #00FFFF; font-weight: bold; font-size: 18px; }
             #Status { color: #00FFFF; font-size: 13px; }
-            #Time { color: #FFFFFF; font-size: 13px; }
+            #Time { color: #00FFFF; font-size: 13px; }
             QPlainTextEdit { background-color: rgba(10,10,10,0.7); border: 1px solid #333; color: #00FFFF; }
             QPushButton { background: transparent; border: 1px solid #333; padding: 6px 10px; }
             QPushButton:hover { border-color: #00FFFF; color: #00FFFF; }
-            QSlider::groove:horizontal { height: 6px; background: #111; border: 1px solid #333; }
+            QSlider::groove:horizontal { height: 6px; background-color: #111; border: 1px solid #333; }
             QSlider::handle:horizontal { width: 14px; background: #00FFFF; margin: -5px 0; border-radius: 2px; }
-            QProgressBar { border: 1px solid #333; background: #111; }
+            QProgressBar { border: 1px solid #333; background-color: #111; }
             QProgressBar::chunk { background: #00FFFF; }
-            QTabBar::tab { background: #111; color: #FFF; padding: 6px 10px; border: 1px solid #333; }
+            QTabBar::tab { background-color: #111; color: #FFF; padding: 6px 10px; border: 1px solid #333; }
             QTabBar::tab:selected { color: #00FFFF; border-color: #00FFFF; }
-            QLineEdit { background: #0a0a0a; border: 1px solid #333; color: #00FFFF; }
-            QComboBox { background: #0a0a0a; border: 1px solid #333; color: #00FFFF; }
-            QListWidget { background: #0a0a0a; border: 1px solid #333; }
+            QLineEdit { background-color: #0a0a0a; border: 1px solid #333; color: #00FFFF; }
+            QComboBox { background-color: #0a0a0a; border: 1px solid #333; color: #00FFFF; }
+            QListWidget { background-color: #0a0a0a; border: 1px solid #333; }
             QCheckBox { color: #FFFFFF; }
             """
         )
@@ -1141,8 +1183,9 @@ class MainWindow(QMainWindow): # main app window
         QPushButton {{
           color: {cyan}; border: 1px solid {grid}; background: rgba(0,0,0,0.25); padding: 6px 12px; letter-spacing: 1px;
         }}
-        QPushButton:hover {{ border-color: {cyan}; color: {cyan}; }}
-        QComboBox, QLineEdit {{ color: {cyan}; border:1px solid {grid}; background: rgba(0,0,0,0.25); padding: 4px; }}
+        QPushButton:hover, QPushButton#ActionButton:hover {{ border-color: {cyan}; color: {cyan}; background: rgba(0,255,255,0.12); }}
+        QPushButton#ActionButton {{ border: 1px solid {grid}; }}
+        QComboBox, QLineEdit, QComboBox#ModeCombo, QComboBox#OutputCombo {{ color: {cyan}; border:1px solid {grid}; background: rgba(0,0,0,0.25); padding: 4px; }}
         QProgressBar {{ color: {cyan}; border:1px solid {grid}; background: rgba(0,0,0,0.2); }}
         QProgressBar::chunk {{ background: {cyan}; }}
         /* Orange title badges */
@@ -1384,17 +1427,14 @@ class MainWindow(QMainWindow): # main app window
         self.update_progress_labels()
 
     def update_progress_labels(self):
-        self.current_progress_label.setText(f"Current File Progress: {self.current_file_progress}%")
         overall_percent = int((self.current_index / self.total_files)*100) if self.total_files > 0 else 100
-        self.overall_progress_label.setText(
-            f"Overall Progress: {overall_percent}%")
+        self.overall_progress_label.setText(f"Progress: {overall_percent}%")
 
     def update_current_progress(self):
         if self.current_file_progress < 100:
             self.current_file_progress += 2
             if self.current_file_progress > 100:
                 self.current_file_progress = 100
-            self.current_progress_bar.setValue(self.current_file_progress)
             self.update_progress_labels()
         else:
             self.file_timer.stop()
@@ -1449,14 +1489,13 @@ class MainWindow(QMainWindow): # main app window
                 self.worker.logMessage.connect(self.append_log)
                 # Sci‑Fi status + sphere reset
                 if hasattr(self, 'status_label'):
-                    self.status_label.setText("SYSTEM STATUS: CONVERTING...")
+                    self.status_label.setText("STATUS: CONVERTING...")
                 if hasattr(self, 'sphere_view'):
                     try:
                         self.sphere_view.set_progress(0)
                     except Exception:
                         pass
                 self.current_file_progress = 0
-                self.current_progress_bar.setValue(self.current_file_progress)
                 self.file_timer.start(500)
                 self.worker.start()
             elif mode in ["Trim Only", "Trim & Convert"]:
@@ -1469,7 +1508,7 @@ class MainWindow(QMainWindow): # main app window
                 self.trim_worker.finished.connect(self.convert_trim_finished)
                 self.trim_worker.error.connect(self.convert_trim_error)
                 if hasattr(self, 'status_label'):
-                    self.status_label.setText("SYSTEM STATUS: TRIMMING...")
+                    self.status_label.setText("STATUS: TRIMMING...")
                 if hasattr(self, 'sphere_view'):
                     try:
                         self.sphere_view.set_progress(0)
@@ -1483,7 +1522,7 @@ class MainWindow(QMainWindow): # main app window
                 self.worker.conversionError.connect(self.file_conversion_error)
                 self.worker.logMessage.connect(self.append_log)
                 if hasattr(self, 'status_label'):
-                    self.status_label.setText("SYSTEM STATUS: CONVERTING...")
+                    self.status_label.setText("STATUS: CONVERTING...")
                 if hasattr(self, 'sphere_view'):
                     try:
                         self.sphere_view.set_progress(0)
@@ -1504,10 +1543,13 @@ class MainWindow(QMainWindow): # main app window
     def file_conversion_finished(self, output_file, message):
         self.file_timer.stop()
         self.current_file_progress = 100
-        self.current_progress_bar.setValue(self.current_file_progress)
         self.append_log(f"{output_file}: {message}")
         if hasattr(self, 'status_label'):
-            self.status_label.setText("SYSTEM STATUS: CONVERSION COMPLETE")
+            # If there are more files, keep converting state; otherwise idle
+            if self.current_index + 1 >= self.total_files:
+                self.status_label.setText("STATUS: IDLE")
+            else:
+                self.status_label.setText("STATUS: CONVERTING...")
         if hasattr(self, 'sphere_view'):
             try:
                 self.sphere_view.set_progress(100)
@@ -1534,7 +1576,7 @@ class MainWindow(QMainWindow): # main app window
         self.file_timer.stop()
         self.append_log(f"Error: {error_message}")
         if hasattr(self, 'status_label'):
-            self.status_label.setText("SYSTEM STATUS: ERROR")
+            self.status_label.setText("STATUS: ERROR")
         if not self.conversion_aborted:
             # Remove the item corresponding to the current index to avoid desync
             if 0 <= self.current_index < self.input_list.count():
@@ -1772,7 +1814,7 @@ class MainWindow(QMainWindow): # main app window
             except Exception:
                 pass
         if hasattr(self, 'status_label'):
-            self.status_label.setText(f"SYSTEM STATUS: DOWNLOADING... {progress}%")
+            self.status_label.setText(f"STATUS: DOWNLOADING... {progress}%")
         if hasattr(self, 'sphere_view'):
             try:
                 self.sphere_view.set_progress(progress)
@@ -1823,7 +1865,7 @@ class MainWindow(QMainWindow): # main app window
         self.download_goto_button.setEnabled(False)
         self.append_log("Starting download...")
         if hasattr(self, 'status_label'):
-            self.status_label.setText("SYSTEM STATUS: DOWNLOADING...")
+            self.status_label.setText("STATUS: DOWNLOADING...")
         if hasattr(self, 'sphere_view'):
             try:
                 self.sphere_view.set_progress(0)
@@ -1851,7 +1893,7 @@ class MainWindow(QMainWindow): # main app window
     def download_finished(self, message, downloaded_file):
         self.append_log(message)
         if hasattr(self, 'status_label'):
-            self.status_label.setText("SYSTEM STATUS: DOWNLOAD COMPLETE")
+            self.status_label.setText("STATUS: DOWNLOAD COMPLETE")
         # Force progress to 100 on completion for consistent bar behavior (after any merge)
         self.download_progress_label.setText("Download Progress: 100%")
         self.download_progress_bar.setValue(100)
@@ -1901,7 +1943,7 @@ class MainWindow(QMainWindow): # main app window
         elif mode == "Download & Convert & Trim":
             self.append_log("Starting trimming of downloaded file (for conversion and trimming)...")
             if hasattr(self, 'status_label'):
-                self.status_label.setText("SYSTEM STATUS: TRIMMING...")
+                self.status_label.setText("STATUS: TRIMMING...")
             self.trim_worker = TrimWorker(downloaded_file, self.trim_start_edit.text(
             ), self.trim_end_edit.text(), use_gpu=self.gpu_checkbox.isChecked(), copy_mode=False)
             self.trim_worker.finished.connect(self.trim_finished)
@@ -1910,7 +1952,7 @@ class MainWindow(QMainWindow): # main app window
         elif mode == "Download & Trim":
             self.append_log("Starting trimming of downloaded file...")
             if hasattr(self, 'status_label'):
-                self.status_label.setText("SYSTEM STATUS: TRIMMING...")
+                self.status_label.setText("STATUS: TRIMMING...")
             self.trim_worker = TrimWorker(downloaded_file, self.trim_start_edit.text(
             ), self.trim_end_edit.text(), use_gpu=self.gpu_checkbox.isChecked(), copy_mode=True)
             self.trim_worker.finished.connect(self.trim_finished)

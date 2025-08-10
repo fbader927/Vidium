@@ -4,6 +4,7 @@ import asyncio
 import tempfile
 import subprocess
 import math
+import time
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLineEdit, QFileDialog, QLabel, QMenu, QComboBox, QPlainTextEdit,
@@ -267,7 +268,7 @@ class ThreeSphereView(QWebEngineView if WEBENGINE_AVAILABLE else QWidget):
         if WEBENGINE_AVAILABLE:
             from pathlib import Path
             # Inline HTML based on UI_reference.html with 3D sphere and terminal
-            html = self._build_html()
+            html = _build_html(self)
             self.setHtml(html)
             # Let overlay UI receive all mouse events
             try:
@@ -294,15 +295,267 @@ class ThreeSphereView(QWebEngineView if WEBENGINE_AVAILABLE else QWidget):
 
     def set_progress(self, percent: int):
         if WEBENGINE_AVAILABLE:
+            try:
+                self.page().runJavaScript(f"window.__vidiumSetProgress({int(percent)});")
+            except Exception:
+                pass
+        else:
+            try:
+                self.fallback.set_progress(percent)
+            except Exception:
+                pass
+
+    def append_log(self, text: str):
+        if WEBENGINE_AVAILABLE:
+            import json
+            try:
+                js_arg = json.dumps(text)
+            except Exception:
+                js_arg = '"' + text.replace("\\", "\\\\").replace("\n", " ").replace("\"", "\\\"") + '"'
+            try:
+                self.page().runJavaScript(f"window.__vidiumAppendLog({js_arg});")
+            except Exception:
+                pass
+        else:
+            try:
+                self.hud.appendPlainText(text)
+            except Exception:
+                pass
+
+    def set_offset_ratio(self, ratio: float):
+        # Move sphere horizontally within view (-0.5..0.5)
+        if WEBENGINE_AVAILABLE:
+            try:
+                if getattr(self, "_web_ready", False):
+                    self.page().runJavaScript(f"window.__vidiumSetOffsetRatio({ratio});")
+                else:
+                    self._pending_offset_ratio = ratio
+            except Exception:
+                pass
+
+    def set_dock_width_ratio(self, ratio: float):
+        if WEBENGINE_AVAILABLE:
+            try:
+                self.page().runJavaScript(f"window.__vidiumSetDockWidth({max(0.2, min(0.5, ratio))});")
+            except Exception:
+                pass
+
+    def _on_web_loaded(self, ok: bool):
+        try:
+            # External driver to keep animation running even during window resize
+            self._anim_timer = QTimer(self)
+            try:
+                self._anim_timer.setTimerType(Qt.PreciseTimer)
+            except Exception:
+                pass
+            self._anim_timer.setInterval(16)
+            self._anim_timer.timeout.connect(lambda: self.page().runJavaScript("window.__vidiumExternalTick && window.__vidiumExternalTick();"))
+            self._anim_timer.start()
+            self._web_ready = True
+            if getattr(self, '_pending_offset_ratio', None) is not None:
+                try:
+                    self.page().runJavaScript(f"window.__vidiumSetOffsetRatio({float(self._pending_offset_ratio)});")
+                except Exception:
+                    pass
+                self._pending_offset_ratio = None
+        except Exception:
+            pass
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if WEBENGINE_AVAILABLE:
+            try:
+                self.page().runJavaScript("window.__vidiumScheduleCommit && window.__vidiumScheduleCommit();")
+            except Exception:
+                pass
+
+class AutoScrollTerminal(QPlainTextEdit):
+    def __init__(self, parent=None, line_limit: int = 1200, trim_step: int = 200,
+                 tick_ms: int = 16, pixels_per_tick: int = 1):
+        super().__init__(parent)
+        self.setReadOnly(True)
+        self._line_limit = max(200, line_limit)
+        self._trim_step = max(50, min(trim_step, self._line_limit // 2))
+        self._paused_hover = False
+        self._paused_focus = False
+        self._pixels_per_tick = max(1, pixels_per_tick)
+        # Drift control (time-based drift for smoothness)
+        self._last_append_s = time.monotonic()
+        self._last_cleared_s = 0.0
+        self._drift_speed_px_s = 10.0  # pixels per second (cinematic smooth)
+        self._subpixel_acc = 0.0
+        self._last_tick_time = time.monotonic()
+        self._resume_after_s = 0.0  # delay before resuming after mouse leaves
+        self._reset_on_resume = False
+        self._resume_delay_s = 2.0  # 2s resume delay per requirement
+        self._idle_clear_s = 2.0    # only clear if idle (no new lines) for at least this long
+        self._min_clear_interval_s = 5.0  # avoid rapid clear-loop
+        self._fade_lines_remaining = 0     # number of blank lines to append for natural fade-out
+        self._auto_timer = QTimer(self)
+        self._auto_timer.timeout.connect(self._auto_scroll_step)
+        self._auto_timer.start(tick_ms)
+        # Hide scrollbars by default; reveal on hover so it looks clean
+        try:
+            self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        except Exception:
+            pass
+        self._rehydrate_provider = None
+        self._direction = -1  # -1: upward (content moves up), +1: downward (content moves down)
+
+    def set_rehydrate_provider(self, provider):
+        # provider: Callable[[], str]
+        self._rehydrate_provider = provider
+
+    def _auto_scroll_step(self):
+        now = time.monotonic()
+        dt = max(0.0, now - self._last_tick_time)
+        self._last_tick_time = now
+        # Respect pause only if the cursor is truly inside the terminal rect; if you're elsewhere
+        # in the same window but not hovering the terminal, keep drifting.
+        if (self._paused_hover or self._paused_focus) and self.underMouse():
+            return
+        if now < self._resume_after_s:
+            return
+        sb = self.verticalScrollBar()
+        if not sb:
+            return
+        # No snap; rely on smooth drift only
+        if self._reset_on_resume and not (self._paused_hover or self._paused_focus):
+            self._reset_on_resume = False
+        # Smooth time-based drift (direction controlled)
+        self._subpixel_acc += self._drift_speed_px_s * dt
+        steps = int(self._subpixel_acc)
+        if steps > 0:
+            self._subpixel_acc -= steps
+            if self._direction < 0:
+                # Upward drift (content moves up): reduce scrollbar value
+                if sb.value() > sb.minimum():
+                    sb.setValue(max(sb.value() - steps, sb.minimum()))
+                    return
+            else:
+                # Downward drift (content moves down): increase scrollbar value
+                if sb.value() < sb.maximum():
+                    sb.setValue(min(sb.value() + steps, sb.maximum()))
+                    return
+        # Natural fade-out: when idle and not hovered, append blank lines to let content scroll out
+        idle_enough = (now - self._last_append_s) >= self._idle_clear_s
+        can_clear = (now - self._last_cleared_s) >= self._min_clear_interval_s
+        not_interacting = (not self.underMouse()) and (not self.hasFocus())
+        if not_interacting and idle_enough and can_clear and ((self._direction < 0 and sb.value() <= sb.minimum()) or (self._direction > 0 and sb.value() >= sb.maximum())):
+            try:
+                self.document().clear()
+            except Exception:
+                pass
+            self._last_cleared_s = now
+            sb.setValue(sb.minimum() if self._direction < 0 else sb.maximum())
+
+    def enterEvent(self, event):
+        self._paused_hover = True
+        try:
+            self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        except Exception:
+            pass
+        # Rehydrate full log view when user hovers and visible buffer is empty
+        try:
+            if self._rehydrate_provider is not None and self.document().blockCount() <= 1:
+                full_text = self._rehydrate_provider() or ""
+                if full_text:
+                    self.setPlainText(full_text)
+                    sb = self.verticalScrollBar()
+                    if sb:
+                        sb.setValue(sb.maximum())
+        except Exception:
+            pass
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._paused_hover = False
+        try:
+            self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        except Exception:
+            pass
+        # Start a small resume delay so drift won't jump immediately
+        self._resume_after_s = time.monotonic() + self._resume_delay_s
+        self._reset_on_resume = True
+        super().leaveEvent(event)
+
+    def focusInEvent(self, event):
+        self._paused_focus = True
+        # Keep scrollbars visible while interacting
+        try:
+            self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        except Exception:
+            pass
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event):
+        self._paused_focus = False
+        # Hide when focus leaves and mouse not hovering
+        if not self._paused_hover:
+            try:
+                self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+                self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            except Exception:
+                pass
+        super().focusOutEvent(event)
+
+    def wheelEvent(self, event):
+        self._paused_focus = True
+        try:
+            self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        except Exception:
+            pass
+        super().wheelEvent(event)
+
+    def append_scrolling(self, text: str):
+        # Append without forcing scroll jumps; let drift create the motion
+        sb = self.verticalScrollBar()
+        old_at_bottom = (sb.value() == sb.maximum()) if sb else False
+        self.appendPlainText(text.rstrip("\n"))
+        self._trim_old_lines()
+        self._last_append_s = time.monotonic()
+        # If user is interacting and we were at bottom, keep pinned to bottom for readability
+        if sb and (self._paused_hover or self._paused_focus) and old_at_bottom:
+            try:
+                sb.setValue(sb.maximum())
+            except Exception:
+                pass
+
+    def _trim_old_lines(self):
+        doc = self.document()
+        blocks = doc.blockCount()
+        if blocks <= self._line_limit:
+            return
+        extra = blocks - self._line_limit + self._trim_step
+        extra = max(self._trim_step, extra)
+        from PySide6.QtGui import QTextCursor
+        cur = QTextCursor(doc)
+        start_pos = doc.findBlockByNumber(0).position()
+        end_pos = doc.findBlockByNumber(min(extra, blocks-1)).position()
+        cur.setPosition(start_pos)
+        cur.setPosition(end_pos, QTextCursor.KeepAnchor)
+        cur.removeSelectedText()
+
+    def set_progress(self, percent: int):
+        if WEBENGINE_AVAILABLE:
             self.page().runJavaScript(f"window.__vidiumSetProgress({int(percent)});")
         else:
             self.fallback.set_progress(percent)
 
     def append_log(self, text: str):
         if WEBENGINE_AVAILABLE:
-            # escape
-            safe = text.replace("\\", "\\\\").replace("\n", " ").replace("\"", "\\\"")
-            self.page().runJavaScript(f"window.__vidiumAppendLog(\"{safe}\");")
+            import json
+            try:
+                js_arg = json.dumps(text)
+            except Exception:
+                # fallback minimal escape if json fails
+                js_arg = '"' + text.replace("\\", "\\\\").replace("\n", " ").replace("\"", "\\\"") + '"'
+            self.page().runJavaScript(f"window.__vidiumAppendLog({js_arg});")
         else:
             self.hud.appendPlainText(text)
 
@@ -353,8 +606,8 @@ class ThreeSphereView(QWebEngineView if WEBENGINE_AVAILABLE else QWidget):
             except Exception:
                 pass
 
-    def _build_html(self) -> str:
-        return r"""
+def _build_html(self) -> str:
+    return r"""
 <!DOCTYPE html>
 <html lang='en'>
 <head>
@@ -473,9 +726,9 @@ class ThreeSphereView(QWebEngineView if WEBENGINE_AVAILABLE else QWidget):
     };
     window.__vidiumSetDockWidth = setDockWidth;
   </script>
-</body>
-</html>
-"""
+ </body>
+ </html>
+ """
 
 def convert_file_with_full_args(args: list) -> str: # runs ffmpeg with full arguments and returns log
     ffmpeg_path = get_ffmpeg_path() 
@@ -530,6 +783,7 @@ class ConversionWorker(QThread): # worker thread for handling video conversion w
     conversionFinished = Signal(str, str) # emitted signal when conversion completes
     conversionError = Signal(str) # emit error
     logMessage = Signal(str) # emit logs
+    progressUpdated = Signal(int) # emit progress percent (0-100)
 
     def __init__(self, input_file, output_file, extra_args=None, use_gpu=False, quality=100):
         super().__init__()
@@ -643,6 +897,13 @@ class ConversionWorker(QThread): # worker thread for handling video conversion w
                 if "-crf" in base_extra_args:
                     idx = base_extra_args.index("-crf")
                     del base_extra_args[idx:idx+2]
+                # Preserve input framerate when using NVENC; remove forced -r 60
+                if "-r" in base_extra_args:
+                    try:
+                        idx = base_extra_args.index("-r")
+                        del base_extra_args[idx:idx+2]
+                    except Exception:
+                        pass
                 if "-c:v" in base_extra_args:
                     idx = base_extra_args.index("-c:v")
                     base_extra_args[idx+1] = "h264_nvenc"
@@ -652,9 +913,28 @@ class ConversionWorker(QThread): # worker thread for handling video conversion w
                 if self.input_file.lower().endswith(".webm"):
                     base_extra_args += ["-tile-columns",
                                         "6", "-frame-parallel", "1"]
+                # Choose NVENC rate-control tuned by quality setting
+                # Map quality slider (10..100) → CQ value roughly (26..20)
+                try:
+                    cq_value = 22
+                    if self.quality >= 95:
+                        cq_value = 20
+                    elif self.quality >= 85:
+                        cq_value = 22
+                    elif self.quality >= 75:
+                        cq_value = 24
+                    else:
+                        cq_value = 26
+                except Exception:
+                    cq_value = 22
                 if bitrate_arg:
-                    base_extra_args += ["-b:v", bitrate_arg, "-maxrate",
-                                        bitrate_arg, "-bufsize", f"{(target_bitrate_k * 2)}k"]
+                    # VBR-HQ with target around source bitrate keeps sizes sane and fast
+                    base_extra_args += ["-rc", "vbr_hq", "-cq", str(cq_value),
+                                        "-b:v", bitrate_arg, "-maxrate", bitrate_arg,
+                                        "-bufsize", f"{(target_bitrate_k * 2)}k"]
+                else:
+                    # Fallback to CQ only
+                    base_extra_args += ["-rc", "vbr_hq", "-cq", str(cq_value)]
                 if self.quality == 100:
                     from converter import is_video_10bit
                     if is_video_10bit(self.input_file):
@@ -664,15 +944,41 @@ class ConversionWorker(QThread): # worker thread for handling video conversion w
                         else:
                             base_extra_args = [
                                 "-c:v", "hevc_nvenc", "-preset", "fast"] + base_extra_args
-                        base_extra_args += ["-qp", "18", "-profile:v",
+                        base_extra_args += ["-profile:v",
                                             "main10", "-pix_fmt", "p010le"]
-                    else:
-                        base_extra_args += ["-qp", "18"]
+                # Copy audio to avoid re-encoding time and keep size reasonable
+                if "-c:a" not in base_extra_args:
+                    base_extra_args += ["-c:a", "copy"]
             from converter import convert_file
-            log = await convert_file(self.input_file, self.output_file, base_extra_args, use_gpu=self.use_gpu, stop_event=self._stop_event)
+            # Emit progress from worker thread; UI will update via signal in main thread
+            def _on_progress(pct: int):
+                try:
+                    self.progressUpdated.emit(int(pct))
+                except Exception:
+                    pass
+            def _on_log(chunk: str):
+                try:
+                    self.logMessage.emit(chunk)
+                except Exception:
+                    pass
+            log = await convert_file(self.input_file, self.output_file, base_extra_args,
+                                     use_gpu=self.use_gpu, stop_event=self._stop_event,
+                                     progress_callback=_on_progress, log_callback=_on_log)
         else: # for unsupported extensions just use extra_args
             from converter import convert_file
-            log = await convert_file(self.input_file, self.output_file, self.extra_args, stop_event=self._stop_event)
+            def _on_progress2(pct: int):
+                try:
+                    self.progressUpdated.emit(int(pct))
+                except Exception:
+                    pass
+            def _on_log2(chunk: str):
+                try:
+                    self.logMessage.emit(chunk)
+                except Exception:
+                    pass
+            log = await convert_file(self.input_file, self.output_file, self.extra_args,
+                                     stop_event=self._stop_event,
+                                     progress_callback=_on_progress2, log_callback=_on_log2)
         return log
 
     def run(self): # entry point for when thread starts
@@ -900,6 +1206,15 @@ class MainWindow(QMainWindow): # main app window
         except Exception:
             pass
         self.quality_value_label = QLabel("100%")
+        try:
+            # Ensure the value is clearly visible to the right of the slider
+            self.quality_value_label.setMinimumWidth(44)
+            self.quality_value_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            # Make the label ignore mouse events so it never blocks slider clicks
+            self.quality_value_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            self.quality_value_label.setTextInteractionFlags(Qt.NoTextInteraction)
+        except Exception:
+            pass
 
         # Container for output label + combo to allow hiding as a block
         self.output_label = QLabel("Output:")
@@ -907,10 +1222,10 @@ class MainWindow(QMainWindow): # main app window
         ofl.addWidget(self.output_label); ofl.addWidget(self.output_format_combo)
 
         # Row B: Output + Quality
-        controls_mid = QWidget(); cmid = QHBoxLayout(controls_mid); cmid.setContentsMargins(8,0,8,0)
+        controls_mid = QWidget(); cmid = QHBoxLayout(controls_mid); cmid.setContentsMargins(8,0,8,0); cmid.setSpacing(10)
         cmid.addWidget(self.output_format_widget)
         cmid.addSpacing(14)
-        cmid.addWidget(QLabel("Quality:")); cmid.addWidget(self.quality_slider); cmid.addWidget(self.quality_value_label)
+        cmid.addWidget(QLabel("Quality:")); cmid.addWidget(self.quality_slider); cmid.addSpacing(6); cmid.addWidget(self.quality_value_label)
         cmid.addStretch(1)
         cg.addWidget(controls_mid, 11, 2, 1, 7)
 
@@ -921,7 +1236,7 @@ class MainWindow(QMainWindow): # main app window
         ar.addStretch(1)
         ar.addWidget(self.convert_button); ar.addWidget(self.stop_button)
         ar.addStretch(1)
-        cg.addWidget(actions_row, 12, 2, 1, 7)
+        cg.addWidget(actions_row, 13, 2, 1, 7)
         # Convert trim widget (hidden by default)
         self.convert_trim_widget = QWidget(); ctwl = QHBoxLayout(self.convert_trim_widget); ctwl.setContentsMargins(8,0,8,0)
         self.convert_trim_label = QLabel("Trim Range:")
@@ -963,20 +1278,25 @@ class MainWindow(QMainWindow): # main app window
         fr_bottom.addWidget(self.default_checkbox)
         fc.addLayout(fr_bottom)
         cg.addWidget(folder_container, 0, 3, 1, 7)
-        # Progress (right area)
-        progress_panel = QWidget(); pl = QVBoxLayout(progress_panel); pl.setContentsMargins(8,0,8,0)
-        self.overall_progress_label = QLabel("Progress: 0%")
-        self.overall_progress_bar = QProgressBar(); self.overall_progress_bar.setRange(0,100)
-        pl.addWidget(self.overall_progress_label); pl.addWidget(self.overall_progress_bar)
-        # Anchor the progress panel to the top-right of the main content area
-        cg.addWidget(progress_panel, 8, 8, 3, 3)
+        # Progress (center area under Output/Quality)
+        progress_panel = QWidget(); pl = QVBoxLayout(progress_panel); pl.setContentsMargins(8,0,8,0); pl.setSpacing(2)
+        self.overall_progress_label = QLabel("Progress:")
+        self.current_progress_bar = QProgressBar(); self.current_progress_bar.setRange(0,100); self.current_progress_bar.setTextVisible(False)
+        pl.addWidget(self.overall_progress_label); pl.addWidget(self.current_progress_bar)
+        # Place progress directly below the Output controls
+        cg.addWidget(progress_panel, 12, 2, 1, 7)
         # Right dock for Convert terminal
         self.convert_right_dock = QWidget(convert_overlay)
         self.convert_right_dock.setObjectName('rightDock')
         dock_layout_c = QVBoxLayout(self.convert_right_dock)
         dock_layout_c.setContentsMargins(6,6,6,6)
         dock_layout_c.setSpacing(6)
-        self.convert_terminal = QPlainTextEdit(); self.convert_terminal.setReadOnly(True); self.convert_terminal.setPlaceholderText("terminal // telemetry ..."); self.convert_terminal.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        # Auto-scroll terminal with smooth drift that pauses on hover/focus
+        self.convert_terminal = AutoScrollTerminal(); self.convert_terminal.setPlaceholderText(""); self.convert_terminal.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        try:
+            self.convert_terminal.set_rehydrate_provider(lambda: self.log_text_edit.toPlainText())
+        except Exception:
+            pass
         # Make terminal area visually seamless with the scene (no boxed border)
         self.convert_right_dock.setStyleSheet("background: transparent; border: none;")
         self.convert_terminal.setStyleSheet(
@@ -1074,7 +1394,11 @@ class MainWindow(QMainWindow): # main app window
         dock_layout_d = QVBoxLayout(self.download_right_dock)
         dock_layout_d.setContentsMargins(6,6,6,6)
         dock_layout_d.setSpacing(6)
-        self.download_terminal = QPlainTextEdit(); self.download_terminal.setReadOnly(True); self.download_terminal.setPlaceholderText("download // telemetry ..."); self.download_terminal.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.download_terminal = AutoScrollTerminal(); self.download_terminal.setPlaceholderText(""); self.download_terminal.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        try:
+            self.download_terminal.set_rehydrate_provider(lambda: self.log_text_edit.toPlainText())
+        except Exception:
+            pass
         self.download_right_dock.setStyleSheet("background: transparent; border: none;")
         self.download_terminal.setStyleSheet(
             """
@@ -1097,8 +1421,8 @@ class MainWindow(QMainWindow): # main app window
         except Exception:
             pass
         # Progress bottom
-        self.download_progress_label = QLabel("Download Progress: 0%")
-        self.download_progress_bar = QProgressBar(); self.download_progress_bar.setRange(0,100)
+        self.download_progress_label = QLabel("Download Progress:")
+        self.download_progress_bar = QProgressBar(); self.download_progress_bar.setRange(0,100); self.download_progress_bar.setTextVisible(False)
         dg.addWidget(self.download_progress_label, 8, 2, 1, 2)
         dg.addWidget(self.download_progress_bar, 9, 2, 1, 8)
         download_container = OverlayContainer(self.download_sphere_view, download_overlay, parent=self.download_tab)
@@ -1407,7 +1731,9 @@ class MainWindow(QMainWindow): # main app window
             self.conversion_queue.append((input_path, output_path))
         self.total_files = len(self.conversion_queue)
         self.current_index = 0
-        self.overall_progress_bar.setValue(0)
+        # Overall progress refers to the queue completion percent; reuse the label but update only the current bar
+        if hasattr(self, 'current_progress_bar'):
+            self.current_progress_bar.setValue(0)
         self.progress_label_update()
         self.convert_button.setEnabled(False)
         self.stop_button.setEnabled(True)
@@ -1420,15 +1746,18 @@ class MainWindow(QMainWindow): # main app window
                 self.conversion_queue[self.current_index][0])
             mode = self.convert_mode_combo.currentText()
             self.progress_label = f"Processing file \"{current_file}\" ({self.current_index+1}/{self.total_files}) in {mode} mode"
-            self.overall_progress_bar.setValue(
-                int((self.current_index / self.total_files)*100))
+            # Keep label text updated; current bar is set via worker progress
+            # (no overall bar widget in convert view any more)
         else:
             self.progress_label = "All operations complete."
         self.update_progress_labels()
 
     def update_progress_labels(self):
-        overall_percent = int((self.current_index / self.total_files)*100) if self.total_files > 0 else 100
-        self.overall_progress_label.setText(f"Progress: {overall_percent}%")
+        # Display the current file progress percentage to match the moving bar
+        try:
+            self.overall_progress_label.setText(f"Progress: {int(self.current_file_progress)}%")
+        except Exception:
+            pass
 
     def update_current_progress(self):
         if self.current_file_progress < 100:
@@ -1443,6 +1772,17 @@ class MainWindow(QMainWindow): # main app window
                 self.sphere_view.set_progress(self.current_file_progress)
             except Exception:
                 pass
+
+    def _on_worker_progress(self, pct: int):
+        # Update UI from worker signal in main thread
+        try:
+            self.current_file_progress = max(0, min(100, int(pct)))
+            self.current_progress_bar.setValue(self.current_file_progress)
+            self.update_progress_labels()
+            if hasattr(self, 'sphere_view'):
+                self.sphere_view.set_progress(self.current_file_progress)
+        except Exception:
+            pass
 
     def start_next_conversion(self):
         if self.conversion_aborted:
@@ -1465,8 +1805,8 @@ class MainWindow(QMainWindow): # main app window
                     item.setData(Qt.UserRole, input_file)
                     self.output_list.addItem(item)
                     self.current_index += 1
-                    overall = int((self.current_index / self.total_files)*100)
-                    self.overall_progress_bar.setValue(overall)
+                    # overall percent reflected in label only
+                    pass
                     self.start_next_conversion()
                     return
             self.progress_label_update()
@@ -1487,6 +1827,10 @@ class MainWindow(QMainWindow): # main app window
                     self.file_conversion_finished)
                 self.worker.conversionError.connect(self.file_conversion_error)
                 self.worker.logMessage.connect(self.append_log)
+                try:
+                    self.worker.progressUpdated.connect(lambda p: self._on_worker_progress(p))
+                except Exception:
+                    pass
                 # Sci‑Fi status + sphere reset
                 if hasattr(self, 'status_label'):
                     self.status_label.setText("STATUS: CONVERTING...")
@@ -1496,6 +1840,12 @@ class MainWindow(QMainWindow): # main app window
                     except Exception:
                         pass
                 self.current_file_progress = 0
+                # During conversion, make the terminal drift downward (content moves down) for a dynamic feel
+                try:
+                    if hasattr(self, 'convert_terminal'):
+                        self.convert_terminal._direction = +1
+                except Exception:
+                    pass
                 self.file_timer.start(500)
                 self.worker.start()
             elif mode in ["Trim Only", "Trim & Convert"]:
@@ -1521,6 +1871,10 @@ class MainWindow(QMainWindow): # main app window
                 self.worker.conversionFinished.connect(self.file_conversion_finished)
                 self.worker.conversionError.connect(self.file_conversion_error)
                 self.worker.logMessage.connect(self.append_log)
+                try:
+                    self.worker.progressUpdated.connect(lambda p: self._on_worker_progress(p))
+                except Exception:
+                    pass
                 if hasattr(self, 'status_label'):
                     self.status_label.setText("STATUS: CONVERTING...")
                 if hasattr(self, 'sphere_view'):
@@ -1530,7 +1884,8 @@ class MainWindow(QMainWindow): # main app window
                         pass
                 self.worker.start()
         else:
-            self.overall_progress_bar.setValue(100)
+            if hasattr(self, 'current_progress_bar'):
+                self.current_progress_bar.setValue(100)
             self.progress_label_update()
             self.media_player.stop()
             self.media_player.setSource(QUrl())
@@ -1555,6 +1910,12 @@ class MainWindow(QMainWindow): # main app window
                 self.sphere_view.set_progress(100)
             except Exception:
                 pass
+        # After conversion, restore terminal drift to cinematic upward glide
+        try:
+            if hasattr(self, 'convert_terminal'):
+                self.convert_terminal._direction = -1
+        except Exception:
+            pass
         if self.convert_mode_combo.currentText() == "Trim & Convert" and self.intermediate_file:
             try:
                 if os.path.exists(self.intermediate_file):
@@ -1567,8 +1928,7 @@ class MainWindow(QMainWindow): # main app window
         item.setData(Qt.UserRole, output_file)
         self.output_list.addItem(item)
         self.current_index += 1
-        overall = int((self.current_index / self.total_files)*100)
-        self.overall_progress_bar.setValue(overall)
+        # overall percent reflected in label only
         self.start_next_conversion()
 
     @Slot(str)
@@ -1582,8 +1942,7 @@ class MainWindow(QMainWindow): # main app window
             if 0 <= self.current_index < self.input_list.count():
                 self.input_list.takeItem(self.current_index)
             self.current_index += 1
-            overall = int((self.current_index / self.total_files)*100)
-            self.overall_progress_bar.setValue(overall)
+            # overall percent reflected in label only
             self.start_next_conversion()
         else:
             self.convert_button.setEnabled(True)
@@ -1686,16 +2045,14 @@ class MainWindow(QMainWindow): # main app window
             item.setData(Qt.UserRole, trimmed_file)
             self.output_list.addItem(item)
             self.current_index += 1
-            overall = int((self.current_index / self.total_files) * 100)
-            self.overall_progress_bar.setValue(overall)
+        # overall percent reflected in label only
             self.start_next_conversion()
 
     @Slot(str)
     def convert_trim_error(self, error_message):
         self.append_log("Trim error: " + error_message)
         self.current_index += 1
-        overall = int((self.current_index / self.total_files)*100)
-        self.overall_progress_bar.setValue(overall)
+        # overall percent reflected in label only
         self.start_next_conversion()
 
     @Slot(str, str)
@@ -1976,9 +2333,15 @@ class MainWindow(QMainWindow): # main app window
         self.log_text_edit.appendPlainText(text)
         # Mirror to the active tab's inline terminal only
         if self.tab_widget.currentIndex() == 0 and hasattr(self, 'convert_terminal'):
-            self.convert_terminal.appendPlainText(text)
+            try:
+                self.convert_terminal.append_scrolling(text)
+            except Exception:
+                self.convert_terminal.appendPlainText(text)
         elif self.tab_widget.currentIndex() == 1 and hasattr(self, 'download_terminal'):
-            self.download_terminal.appendPlainText(text)
+            try:
+                self.download_terminal.append_scrolling(text)
+            except Exception:
+                self.download_terminal.appendPlainText(text)
         if hasattr(self, 'sphere_view'):
             try:
                 self.sphere_view.append_log(text)

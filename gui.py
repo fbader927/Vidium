@@ -145,6 +145,10 @@ class OverlayContainer(QWidget):
         self.base_widget = base_widget
         self.overlay_widget = overlay_widget
         self.reserve_right_ratio = 0.35  # portion of width reserved for sphere/right-dock
+        # Allow per-container margin tuning so tabs can differ visually
+        self._left_margin = 20
+        self._top_margin = 20
+        self._bottom_margin = 20
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -156,6 +160,14 @@ class OverlayContainer(QWidget):
     def set_right_reserve_ratio(self, ratio: float):
         self.reserve_right_ratio = max(0.2, min(0.5, ratio))
 
+    def set_top_margin(self, pixels: int):
+        self._top_margin = max(0, min(40, int(pixels)))
+        # Apply immediately if layout is available
+        lay = self.overlay_widget.layout()
+        if lay is not None:
+            right_margin = int(self.width() * self.reserve_right_ratio)
+            lay.setContentsMargins(self._left_margin, self._top_margin, right_margin, self._bottom_margin)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if self.overlay_widget is not None:
@@ -164,7 +176,7 @@ class OverlayContainer(QWidget):
             lay = self.overlay_widget.layout()
             if lay is not None:
                 right_margin = int(self.width() * self.reserve_right_ratio)
-                lay.setContentsMargins(20, 20, right_margin, 20)
+                lay.setContentsMargins(self._left_margin, self._top_margin, right_margin, self._bottom_margin)
             # position any child panel named 'rightDock' into the reserved area
             dock = self.overlay_widget.findChild(QWidget, 'rightDock')
             if dock is not None:
@@ -1332,9 +1344,10 @@ class MainWindow(QMainWindow): # main app window
         self.download_tab = QWidget()
         self.download_sphere_view = ThreeSphereView()
         if hasattr(self.download_sphere_view, "set_offset_ratio"):
-            self.download_sphere_view.set_offset_ratio(0.33)
+            # Push the sphere further right to open up left column
+            self.download_sphere_view.set_offset_ratio(0.5)
         download_overlay = QWidget(self.download_tab); download_overlay.setAttribute(Qt.WA_StyledBackground, True); download_overlay.setStyleSheet("background: transparent;")
-        dg = QGridLayout(download_overlay); dg.setContentsMargins(24,24,24,24); dg.setHorizontalSpacing(16); dg.setVerticalSpacing(12)
+        dg = QGridLayout(download_overlay); dg.setContentsMargins(24,12,24,24); dg.setHorizontalSpacing(16); dg.setVerticalSpacing(0)
         try:
             stretch_map_d = {0:2, 1:2, 2:2, 3:3, 4:3, 5:3, 6:3, 7:2, 8:1, 9:1, 10:1}
             for col, val in stretch_map_d.items():
@@ -1345,48 +1358,136 @@ class MainWindow(QMainWindow): # main app window
         url_row = QWidget(); ur = QHBoxLayout(url_row); ur.setContentsMargins(8,0,8,0)
         ur.addWidget(QLabel("Video URL:"))
         self.video_url_edit = QLineEdit(); self.video_url_edit.setPlaceholderText("Enter Video URL here...")
+        try:
+            # We'll keep a fixed policy but compute the exact width after layout to line up with the folder row
+            self.video_url_edit.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        except Exception:
+            pass
         ur.addWidget(self.video_url_edit)
-        dg.addWidget(url_row, 1, 2, 1, 8)
+        ur.addStretch(1)
         # Folder row
-        folder_row2 = QWidget(); fr2 = QHBoxLayout(folder_row2); fr2.setContentsMargins(8,0,8,0)
+        folder_row2 = QWidget(); fr2 = QHBoxLayout(folder_row2); fr2.setContentsMargins(8,0,8,0); fr2.setSpacing(10)
         fr2.addWidget(QLabel("Download Folder:"))
         DEFAULT_DOWNLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Downloads")
-        self.download_folder_edit = QLineEdit(); self.download_folder_edit.setText(self.settings.value("default_download_folder", DEFAULT_DOWNLOAD_FOLDER))
+        self.download_folder_edit = QLineEdit(); self.download_folder_edit.setObjectName("DlFolderEdit"); self.download_folder_edit.setText(self.settings.value("default_download_folder", DEFAULT_DOWNLOAD_FOLDER))
         try:
-            self.download_folder_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            self.download_folder_edit.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            # Keep path field comfortably short so it ends before the buttons; it will scroll when text is long
+            self.download_folder_edit.setMinimumWidth(360)
+            self.download_folder_edit.setMaximumWidth(600)
+        except Exception:
+            pass
+        # Hide the right border so no vertical seam can appear beneath adjacent buttons
+        try:
+            self.download_folder_edit.setStyleSheet("QLineEdit#DlFolderEdit { border-right: 0px; padding-right: 6px; }")
         except Exception:
             pass
         fr2.addWidget(self.download_folder_edit, 1)
-        self.download_browse_button = QPushButton("Browse"); self.download_browse_button.clicked.connect(self.browse_download_folder)
-        self.download_goto_button = QPushButton("Go To Folder"); self.download_goto_button.clicked.connect(self.goto_download_folder)
-        self.download_default_checkbox = QCheckBox("Default"); self.download_default_checkbox.setChecked(self.settings.value("default_download_checked", True, type=bool)); self.download_default_checkbox.stateChanged.connect(self.download_default_checkbox_changed)
-        fr2.addWidget(self.download_browse_button); fr2.addWidget(self.download_goto_button); fr2.addWidget(self.download_default_checkbox); fr2.addStretch(1)
-        dg.addWidget(folder_row2, 2, 2, 1, 8)
-        # Mode/output row
-        dl_controls = QWidget(); dlc = QHBoxLayout(dl_controls); dlc.setContentsMargins(8,0,8,0)
-        self.download_mode_combo = QComboBox(); self.download_mode_combo.addItems(["Download Only", "Download & Convert", "Download & Trim", "Download & Convert & Trim"]); self.download_mode_combo.currentIndexChanged.connect(self.download_mode_changed)
+        self.download_browse_button = QPushButton("Browse"); self.download_browse_button.setObjectName("DlBrowseBtn"); self.download_browse_button.clicked.connect(self.browse_download_folder)
+        self.download_goto_button = QPushButton("Go To Folder"); self.download_goto_button.setObjectName("DlGoBtn"); self.download_goto_button.clicked.connect(self.goto_download_folder)
+        # Ensure both buttons avoid any seam: give them opaque background and extra left padding on 'Go To Folder'
         try:
-            self.download_mode_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
-            self.download_mode_combo.setMinimumContentsLength(22)
-            self.download_mode_combo.setMinimumWidth(240)
+            self.download_browse_button.setStyleSheet(
+                "QPushButton#DlBrowseBtn { background-color: rgba(0,0,0,0.25); border:1px solid #333; padding:6px 12px; border-radius:3px; }"
+                "QPushButton#DlBrowseBtn:hover { border-color:#00FFFF; color:#00FFFF; }"
+                "QPushButton#DlBrowseBtn:focus { outline: none; }"
+            )
+            self.download_goto_button.setStyleSheet(
+                "QPushButton#DlGoBtn { background-color: rgba(0,0,0,0.25); border:1px solid #333; padding:6px 14px 6px 16px; border-radius:3px; }"
+                "QPushButton#DlGoBtn:hover { border-color:#00FFFF; color:#00FFFF; }"
+                "QPushButton#DlGoBtn:focus { outline: none; }"
+            )
         except Exception:
             pass
-        dlc.addWidget(self.download_mode_combo)
-        dlc.addSpacing(10); dlc.addWidget(QLabel("Output:"))
+        self.download_default_checkbox = QCheckBox("Default"); self.download_default_checkbox.setChecked(self.settings.value("default_download_checked", True, type=bool)); self.download_default_checkbox.stateChanged.connect(self.download_default_checkbox_changed)
+        btn_group = QWidget(); bgl = QHBoxLayout(btn_group); bgl.setContentsMargins(0,0,0,0); bgl.setSpacing(6)
+        bgl.addWidget(self.download_browse_button)
+        bgl.addWidget(self.download_goto_button)
+        fr2.addWidget(btn_group); fr2.addWidget(self.download_default_checkbox); fr2.addStretch(1)
+        # Stack URL + Folder as tightly as possible
+        header_block = QWidget(); hb = QVBoxLayout(header_block); hb.setContentsMargins(0,0,0,0); hb.setSpacing(0)
+        try:
+            header_block.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        except Exception:
+            pass
+        hb.addWidget(url_row)
+        hb.addWidget(folder_row2)
+        # header_block will be added together with mode row via top_stack below
+        # dg.addWidget(header_block, 0, 0, 1, 10)
+        # Mode/output row (aligned with Convert tab layout)
+        dl_controls = QWidget(); dlc = QHBoxLayout(dl_controls); dlc.setContentsMargins(8,0,8,0); dlc.setSpacing(10)
+        try:
+            dl_controls.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        except Exception:
+            pass
+        self.download_mode_combo = QComboBox(); self.download_mode_combo.addItems(["Download Only", "Download & Convert", "Download & Trim", "Download & Convert & Trim"]); self.download_mode_combo.currentIndexChanged.connect(self.download_mode_changed)
+        try:
+            # Lock a fixed width so the row layout never reflows on selection
+            # 230 fits the longest label "Download & Convert & Trim"
+            self.download_mode_combo.setFixedWidth(230)
+            self.download_mode_combo.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        except Exception:
+            pass
+        dlc.addWidget(self.download_mode_combo, 0, Qt.AlignVCenter)
+        # Spacer before output controls so the mode combo stays at a fixed x-position
+        self.download_output_gap = QWidget(); self.download_output_gap.setFixedWidth(14); dlc.addWidget(self.download_output_gap)
+        self.download_output_label = QLabel("Output:"); dlc.addWidget(self.download_output_label, 0, Qt.AlignVCenter)
         self.download_output_format_combo = QComboBox(); self.populate_output_format_combo(self.download_output_format_combo)
-        dlc.addWidget(self.download_output_format_combo)
-        dg.addWidget(dl_controls, 3, 2, 1, 8)
-        # Trim widget for download flows (hidden)
-        self.trim_widget = QWidget(); dltw = QHBoxLayout(self.trim_widget); dltw.setContentsMargins(8,0,8,0)
+        try:
+            fixed_output_width = max(180, self.download_output_format_combo.sizeHint().width())
+            self.download_output_format_combo.setFixedWidth(fixed_output_width)
+        except Exception:
+            try:
+                self.download_output_format_combo.setMinimumWidth(180)
+            except Exception:
+                pass
+        dlc.addWidget(self.download_output_format_combo, 0, Qt.AlignVCenter)
+        # Normalize control heights so the row doesn't shift between modes/themes
+        try:
+            h = max(self.download_mode_combo.sizeHint().height(), self.download_output_format_combo.sizeHint().height())
+            self.download_mode_combo.setFixedHeight(h)
+            self.download_output_format_combo.setFixedHeight(h)
+        except Exception:
+            pass
+        try:
+            dlc.addStretch(1)
+        except Exception:
+            pass
+        # Place header + mode rows in a single tight vertical stack to remove inter-row gaps
+        top_stack = QWidget(); ts = QVBoxLayout(top_stack); ts.setContentsMargins(0,0,0,0); ts.setSpacing(2)
+        try:
+            top_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        except Exception:
+            pass
+        ts.addWidget(header_block)
+        ts.addWidget(dl_controls)
+        # Pin to the top-left to eliminate any centering when internal width changes
+        dg.addWidget(top_stack, 0, 0, 1, 10, alignment=Qt.AlignLeft | Qt.AlignTop)
+        # Trim widget for download flows (hidden) inside a fixed-height container so
+        # the overall layout below (progress bar) does not shift when toggled
+        self.trim_widget = QWidget(); dltw = QHBoxLayout(self.trim_widget); dltw.setContentsMargins(8,0,8,0); dltw.setSpacing(6)
         self.trim_label = QLabel("Trim Range:")
         self.trim_start_edit = FixedTimeLineEdit(); self.trim_start_edit.setText("00:00:00:00")
         self.trim_to_label = QLabel("to")
         self.trim_end_edit = FixedTimeLineEdit(); self.trim_end_edit.setText("00:00:00:00")
         dltw.addWidget(self.trim_label); dltw.addWidget(self.trim_start_edit); dltw.addWidget(self.trim_to_label); dltw.addWidget(self.trim_end_edit); dltw.addStretch(1)
         self.trim_widget.hide()
-        dg.addWidget(self.trim_widget, 4, 2, 1, 8)
-        # Download button center
-        self.download_button = QPushButton("Download"); dg.addWidget(self.download_button, 5, 5, 1, 2, alignment=Qt.AlignCenter)
+        self.trim_container = QWidget(); tc = QVBoxLayout(self.trim_container); tc.setContentsMargins(0,0,0,0); tc.setSpacing(0)
+        tc.addWidget(self.trim_widget)
+        try:
+            self.trim_container.setFixedHeight(max(34, self.trim_widget.sizeHint().height()))
+        except Exception:
+            self.trim_container.setFixedHeight(36)
+        # Place directly under the top stack with minimal gap
+        dg.addWidget(self.trim_container, 1, 0, 1, 10)
+        # Add an expanding spacer below the trim container to push progress to the bottom consistently
+        try:
+            spacer_bottom_push = QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding)
+            dg.addItem(spacer_bottom_push, 2, 0, 1, 10)
+        except Exception:
+            pass
+        # Download button centered under progress (bottom area)
+        self.download_button = QPushButton("Download"); dg.addWidget(self.download_button, 21, 5, 1, 2, alignment=Qt.AlignCenter)
         self.download_button.clicked.connect(self.start_download)
         # Right dock for Download terminal
         self.download_right_dock = QWidget(download_overlay)
@@ -1414,18 +1515,20 @@ class MainWindow(QMainWindow): # main app window
             """
         )
         dock_layout_d.addWidget(self.download_terminal)
-        # Hide output format when mode is Download Only
-        # Initialize visibility of download output format row when present
+        # Show output controls only for conversion modes; initialize visibility now
         try:
             self.download_mode_changed(self.download_mode_combo.currentIndex())
         except Exception:
             pass
-        # Progress bottom
+        # Progress (keep low/bottom to avoid overlap with sphere), align similar to Convert tab
         self.download_progress_label = QLabel("Download Progress:")
         self.download_progress_bar = QProgressBar(); self.download_progress_bar.setRange(0,100); self.download_progress_bar.setTextVisible(False)
-        dg.addWidget(self.download_progress_label, 8, 2, 1, 2)
-        dg.addWidget(self.download_progress_bar, 9, 2, 1, 8)
+        download_progress_panel = QWidget(); dp = QVBoxLayout(download_progress_panel); dp.setContentsMargins(8,0,8,0); dp.setSpacing(2)
+        dp.addWidget(self.download_progress_label); dp.addWidget(self.download_progress_bar)
+        dg.addWidget(download_progress_panel, 20, 0, 1, 10)
         download_container = OverlayContainer(self.download_sphere_view, download_overlay, parent=self.download_tab)
+        # Pull all overlay content up to reduce the tall gap users reported
+        download_container.set_top_margin(6)
         # Keep references for centering in download tab
         self.download_overlay = download_overlay
         dl_container_layout = QVBoxLayout(self.download_tab)
@@ -1452,6 +1555,8 @@ class MainWindow(QMainWindow): # main app window
 
         # Center the canvas between left panel and right dock after layout is ready
         QTimer.singleShot(0, self.center_sphere_canvas)
+        # Align the URL field width to end at the same right edge as the folder row controls
+        QTimer.singleShot(0, self._align_download_url_width)
 
     def init_drop_overlay(self):
         self.drop_overlay = QWidget(self)
@@ -1473,6 +1578,33 @@ class MainWindow(QMainWindow): # main app window
         if hasattr(self, 'time_label') and self.time_label.text() != "Iteration: 2V":
             self.time_label.setText("Iteration: 2V")
 
+    def _align_download_url_width(self):
+        try:
+            # Compute right edge of the folder edit + buttons block and align URL width to that (minus a small margin)
+            if not hasattr(self, 'video_url_edit'):
+                return
+            # Find the parent layout containing the folder row
+            folder_row_parent = getattr(self, 'download_folder_edit', None)
+            browse_btn = getattr(self, 'download_browse_button', None)
+            goto_btn = getattr(self, 'download_goto_button', None)
+            if folder_row_parent is None or browse_btn is None or goto_btn is None:
+                return
+            # Rightmost x among the folder edit + buttons
+            widgets = [folder_row_parent, browse_btn, goto_btn]
+            right_edges = []
+            for w in widgets:
+                p = w.mapToGlobal(w.rect().topRight())
+                right_edges.append(p.x())
+            if not right_edges:
+                return
+            rightmost = max(right_edges)
+            # Compute left x of URL edit to set width
+            left = self.video_url_edit.mapToGlobal(self.video_url_edit.rect().topLeft()).x()
+            new_w = max(200, rightmost - left - 19)
+            self.video_url_edit.setFixedWidth(new_w)
+        except Exception:
+            pass
+
     def apply_sci_fi_styles(self):
         self.setStyleSheet(
             """
@@ -1486,6 +1618,8 @@ class MainWindow(QMainWindow): # main app window
             QPlainTextEdit { background-color: rgba(10,10,10,0.7); border: 1px solid #333; color: #00FFFF; }
             QPushButton { background: transparent; border: 1px solid #333; padding: 6px 10px; }
             QPushButton:hover { border-color: #00FFFF; color: #00FFFF; }
+            /* Remove any inner vertical separators some platforms draw */
+            QPushButton::separator { width: 0px; height: 0px; }
             QSlider::groove:horizontal { height: 6px; background-color: #111; border: 1px solid #333; }
             QSlider::handle:horizontal { width: 14px; background: #00FFFF; margin: -5px 0; border-radius: 2px; }
             QProgressBar { border: 1px solid #333; background-color: #111; }
@@ -1997,10 +2131,16 @@ class MainWindow(QMainWindow): # main app window
 
     def download_mode_changed(self, index):
         mode = self.download_mode_combo.currentText()
-        visible_format = mode in ["Download & Convert", "Download & Convert & Trim"]
-        # The new overlay layout uses a direct combo, not a layout group; just toggle its visibility if present
+        enable_format = mode in ["Download & Convert", "Download & Convert & Trim"]
+        # Show/hide the Output controls entirely for non-conversion modes
         if hasattr(self, 'download_output_format_combo') and self.download_output_format_combo is not None:
-            self.download_output_format_combo.setVisible(visible_format)
+            self.download_output_format_combo.setVisible(enable_format)
+        # Keep the label visible as well, matching the combo's enabled state
+        if hasattr(self, 'download_output_label') and self.download_output_label is not None:
+            self.download_output_label.setVisible(enable_format)
+        # Hide/show the small gap before output to avoid a stray space when hidden
+        if hasattr(self, 'download_output_gap') and self.download_output_gap is not None:
+            self.download_output_gap.setVisible(enable_format)
         # GPU is not applicable to WebM and some audio-only outputs; reflect that in the checkbox state
         try:
             if "Convert" in mode:
@@ -2411,6 +2551,11 @@ class MainWindow(QMainWindow): # main app window
         if hasattr(self, 'crt_overlay') and self.crt_overlay is not None:
             self.crt_overlay.setGeometry(self.rect())
         self.center_sphere_canvas()
+        # Keep URL bar aligned with folder row after resizes
+        try:
+            self._align_download_url_width()
+        except Exception:
+            pass
 
     def center_sphere_canvas(self):
         try:

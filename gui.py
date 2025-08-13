@@ -193,6 +193,8 @@ class SphereWidget(QWidget):
         self._progress = 0
         self._angle_deg = 0.0
         self._pulse = 0.0
+        self._offset_ratio = 0.0  # X axis offset: -0.5 .. 0.5
+        self._offset_y_ratio = 0.0  # Y axis offset: -0.5 .. 0.5 (negative = up)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(16)
@@ -216,7 +218,9 @@ class SphereWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         rect = self.rect().adjusted(10, 10, -10, -10)
-        cx, cy = rect.center().x(), rect.center().y()
+        # Shift horizontally according to offset ratio so we can align under different side panels
+        cx = rect.center().x() + int(max(-0.5, min(0.5, self._offset_ratio)) * (rect.width() * 0.5))
+        cy = rect.center().y() + int(max(-0.5, min(0.5, self._offset_y_ratio)) * (rect.height() * 0.5))
         radius = min(rect.width(), rect.height()) // 4
         circle_rect = QRect = rect.adjusted(rect.width()//2 - radius - (rect.center().x()-cx),
                                             rect.height()//2 - radius - (rect.center().y()-cy),
@@ -274,6 +278,29 @@ class SphereWidget(QWidget):
         for y in range(int(cy - radius), int(cy + radius), 4):
             painter.drawLine(int(cx - radius), y, int(cx + radius), y)
 
+    def set_offset_ratio(self, ratio: float):
+        # Accept the same API as the WebEngine version
+        try:
+            self._offset_ratio = max(-0.5, min(0.5, float(ratio)))
+            self.update()
+        except Exception:
+            pass
+
+    def set_offset_y_ratio(self, ratio: float):
+        try:
+            self._offset_y_ratio = max(-0.5, min(0.5, float(ratio)))
+            self.update()
+        except Exception:
+            pass
+
+    def set_offset_ratios(self, x_ratio: float, y_ratio: float):
+        try:
+            self._offset_ratio = max(-0.5, min(0.5, float(x_ratio)))
+            self._offset_y_ratio = max(-0.5, min(0.5, float(y_ratio)))
+            self.update()
+        except Exception:
+            pass
+
 class ThreeSphereView(QWebEngineView if WEBENGINE_AVAILABLE else QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -304,6 +331,8 @@ class ThreeSphereView(QWebEngineView if WEBENGINE_AVAILABLE else QWidget):
             self.hud.setReadOnly(True)
             self.hud.setFixedHeight(76)
             layout.addWidget(self.hud)
+        # Store pending offsets until the Web page is ready
+        self._pending_canvas_offset = None
 
     def set_progress(self, percent: int):
         if WEBENGINE_AVAILABLE:
@@ -344,11 +373,27 @@ class ThreeSphereView(QWebEngineView if WEBENGINE_AVAILABLE else QWidget):
                     self._pending_offset_ratio = ratio
             except Exception:
                 pass
+        else:
+            # Fallback widget: forward to internal sphere
+            try:
+                self.fallback.set_offset_ratio(ratio)
+            except Exception:
+                pass
 
     def set_dock_width_ratio(self, ratio: float):
         if WEBENGINE_AVAILABLE:
             try:
                 self.page().runJavaScript(f"window.__vidiumSetDockWidth({max(0.2, min(0.5, ratio))});")
+            except Exception:
+                pass
+
+    def set_canvas_offset(self, x_pixels: float, y_pixels: float):
+        if WEBENGINE_AVAILABLE:
+            try:
+                if getattr(self, "_web_ready", False):
+                    self.page().runJavaScript(f"window.__vidiumSetCanvasOffset && window.__vidiumSetCanvasOffset({float(x_pixels)}, {float(y_pixels)});")
+                else:
+                    self._pending_canvas_offset = (float(x_pixels), float(y_pixels))
             except Exception:
                 pass
 
@@ -370,6 +415,13 @@ class ThreeSphereView(QWebEngineView if WEBENGINE_AVAILABLE else QWidget):
                 except Exception:
                     pass
                 self._pending_offset_ratio = None
+            if self._pending_canvas_offset is not None:
+                try:
+                    x, y = self._pending_canvas_offset
+                    self.page().runJavaScript(f"window.__vidiumSetCanvasOffset && window.__vidiumSetCanvasOffset({float(x)}, {float(y)});")
+                except Exception:
+                    pass
+                self._pending_canvas_offset = None
         except Exception:
             pass
 
@@ -660,7 +712,11 @@ def _build_html(self) -> str:
     canvas.style.position = 'absolute';
     canvas.style.left = '50%';
     canvas.style.top = '50%';
-    canvas.style.transform = 'translate(-50%, -50%)';
+    let canvasOffsetX = 0; let canvasOffsetY = 0; // pixel offsets
+    function applyCanvasOffset(){
+      canvas.style.transform = `translate(calc(-50% + ${canvasOffsetX}px), calc(-50% + ${canvasOffsetY}px))`;
+    }
+    applyCanvasOffset();
 
     const group = new THREE.Group(); scene.add(group);
     const geometry = new THREE.SphereGeometry(2, 32, 32); // doubled size
@@ -691,6 +747,7 @@ def _build_html(self) -> str:
       buildGrid();
       // Keep 3D group centered; any user offset is applied in world units (small)
       group.position.x = offsetRatio; // -0.5..0.5 world units
+      applyCanvasOffset();
     }
     const clock = new THREE.Clock();
     function animate(){ requestAnimationFrame(animate); const dt = clock.getDelta(); group.rotation.x += 0.8*dt; group.rotation.y += 1.2*dt; const t = clock.elapsedTime; const pulse = 0.95 + 0.03*Math.sin(t); innerSphere.scale.set(pulse,pulse,pulse); renderer.render(scene,camera); }
@@ -737,6 +794,9 @@ def _build_html(self) -> str:
       group.position.x = offsetRatio;
     };
     window.__vidiumSetDockWidth = setDockWidth;
+    window.__vidiumSetCanvasOffset = function(x,y){
+      canvasOffsetX = isFinite(x) ? x : 0; canvasOffsetY = isFinite(y) ? y : 0; applyCanvasOffset();
+    };
   </script>
  </body>
  </html>
@@ -1202,6 +1262,7 @@ class MainWindow(QMainWindow): # main app window
         except Exception:
             pass
         ctop.addStretch(1)
+        self.convert_controls_top = controls_top
         cg.addWidget(controls_top, 8, 2, 1, 7)
 
         # Prepare output/quality widgets
@@ -1239,6 +1300,7 @@ class MainWindow(QMainWindow): # main app window
         cmid.addSpacing(14)
         cmid.addWidget(QLabel("Quality:")); cmid.addWidget(self.quality_slider); cmid.addSpacing(6); cmid.addWidget(self.quality_value_label)
         cmid.addStretch(1)
+        self.convert_controls_mid = controls_mid
         cg.addWidget(controls_mid, 9, 2, 1, 7)
 
         # Actions row: Convert / Stop centered
@@ -1248,6 +1310,7 @@ class MainWindow(QMainWindow): # main app window
         ar.addStretch(1)
         ar.addWidget(self.convert_button); ar.addWidget(self.stop_button)
         ar.addStretch(1)
+        self.convert_actions_row = actions_row
         cg.addWidget(actions_row, 11, 2, 1, 7)
         # Convert trim widget (hidden by default)
         self.convert_trim_widget = QWidget(); ctwl = QHBoxLayout(self.convert_trim_widget); ctwl.setContentsMargins(8,0,8,0)
@@ -1296,6 +1359,7 @@ class MainWindow(QMainWindow): # main app window
         self.current_progress_bar = QProgressBar(); self.current_progress_bar.setRange(0,100); self.current_progress_bar.setTextVisible(False)
         pl.addWidget(self.overall_progress_label); pl.addWidget(self.current_progress_bar)
         # Place progress directly below the Output controls
+        self.convert_progress_panel = progress_panel
         cg.addWidget(progress_panel, 10, 2, 1, 7)
         # Right dock for Convert terminal
         self.convert_right_dock = QWidget(convert_overlay)
@@ -1463,6 +1527,8 @@ class MainWindow(QMainWindow): # main app window
         ts.addWidget(dl_controls)
         # Pin to the top-left to eliminate any centering when internal width changes
         dg.addWidget(top_stack, 0, 0, 1, 10, alignment=Qt.AlignLeft | Qt.AlignTop)
+        # Keep a reference for centering math
+        self.download_top_stack = top_stack
         # Insert a spacer block to mirror the Convert tab's left files panel vertical footprint,
         # so subsequent rows (trim/progress/actions) line up visually with Convert.
         try:
@@ -1533,6 +1599,8 @@ class MainWindow(QMainWindow): # main app window
         download_progress_panel = QWidget(); dp = QVBoxLayout(download_progress_panel); dp.setContentsMargins(8,0,8,0); dp.setSpacing(2)
         dp.addWidget(self.download_progress_label); dp.addWidget(self.download_progress_bar)
         dg.addWidget(download_progress_panel, 10, 2, 1, 7)
+        # Reference for centering
+        self.download_progress_panel = download_progress_panel
         download_container = OverlayContainer(self.download_sphere_view, download_overlay, parent=self.download_tab)
         # Match top margin used by Convert tab for consistent vertical alignment
         download_container.set_top_margin(20)
@@ -2568,28 +2636,69 @@ class MainWindow(QMainWindow): # main app window
         try:
             # Convert tab centering
             if hasattr(self, 'convert_overlay') and self.convert_overlay is not None:
-                w = self.width(); h = self.height()
-                # Left panel width estimate
+                w = max(1, self.width())
+                h = max(1, self.height())
+                # Left panel width
                 left_panel = getattr(self, 'files_panel', None)
-                left_w = left_panel.width() if left_panel else int(w*0.28)
-                # Right dock width via overlay layout margins
+                left_w = left_panel.width() if left_panel else int(w * 0.28)
+                # Right dock width
                 right_dock = getattr(self, 'convert_right_dock', None)
-                right_w = right_dock.width() if right_dock else int(w*0.35)
-                # Target center between left and right panes
-                center_x = left_w + (w - left_w - right_w) // 2
-                # Translate to ratio for web canvas offset (negative moves left)
-                usable_w = max(1, w - left_w - right_w)
-                ratio = 0.0
+                right_w = right_dock.width() if right_dock else int(w * 0.35)
+                # Reference Y: vertically center between controls mid and actions
+                try:
+                    # Vertical midpoint between the overall top UI block and the progress bar,
+                    # then bias upward by ~15% of the usable region height to avoid overlap
+                    top_y = self.output_folder_edit.mapTo(self, self.output_folder_edit.rect().topLeft()).y()
+                    bottom_y = self.convert_progress_panel.mapTo(self, self.convert_progress_panel.rect().bottomLeft()).y()
+                    region_height = max(1.0, float(bottom_y - top_y))
+                    region_center_y = (top_y + bottom_y) / 2.0 - 0.15 * region_height
+                except Exception:
+                    region_center_y = h / 2.0
+                region_center_x = left_w + (w - left_w - right_w) / 2.0
+                dx = region_center_x - (w / 2.0)
+                dy = region_center_y - (h / 2.0)
+                x_ratio = max(-0.5, min(0.5, dx / (w / 2.0)))
+                y_ratio = max(-0.5, min(0.5, dy / (h / 2.0)))
                 if hasattr(self, 'sphere_view'):
                     try:
-                        self.sphere_view.set_offset_ratio(ratio)
+                        # Also nudge the canvas position in pixels for exact alignment
+                        px_x = dx; px_y = dy
+                        if WEBENGINE_AVAILABLE and hasattr(self.sphere_view, 'set_canvas_offset'):
+                            self.sphere_view.set_canvas_offset(px_x, px_y)
+                        if hasattr(self.sphere_view, 'set_offset_ratios'):
+                            self.sphere_view.set_offset_ratios(float(x_ratio), float(y_ratio))
+                        else:
+                            self.sphere_view.set_offset_ratio(float(x_ratio))
                     except Exception:
                         pass
             # Download tab centering
             if hasattr(self, 'download_right_dock') and self.download_right_dock is not None:
                 if hasattr(self, 'download_sphere_view'):
                     try:
-                        self.download_sphere_view.set_offset_ratio(0.0)
+                        w = max(1, self.width()); h = max(1, self.height())
+                        right_w = self.download_right_dock.width() if self.download_right_dock else int(w * 0.35)
+                        left_w = 0
+                        # Align vertically between trim row and progress in download tab
+                        try:
+                            # Vertical midpoint between the download tab top block and its progress bar,
+                            # with a slight upward bias to match Convert tab positioning
+                            dl_top = self.download_top_stack.mapTo(self, self.download_top_stack.rect().topLeft()).y()
+                            dl_bottom = self.download_progress_panel.mapTo(self, self.download_progress_panel.rect().bottomLeft()).y()
+                            region_height = max(1.0, float(dl_bottom - dl_top))
+                            region_center_y = (dl_top + dl_bottom) / 2.0 - 0.15 * region_height
+                        except Exception:
+                            region_center_y = h / 2.0
+                        region_center_x = left_w + (w - left_w - right_w) / 2.0
+                        dx = region_center_x - (w / 2.0)
+                        dy = region_center_y - (h / 2.0)
+                        x_ratio = max(-0.5, min(0.5, dx / (w / 2.0)))
+                        y_ratio = max(-0.5, min(0.5, dy / (h / 2.0)))
+                        if WEBENGINE_AVAILABLE and hasattr(self.download_sphere_view, 'set_canvas_offset'):
+                            self.download_sphere_view.set_canvas_offset(dx, dy)
+                        if hasattr(self.download_sphere_view, 'set_offset_ratios'):
+                            self.download_sphere_view.set_offset_ratios(float(x_ratio), float(y_ratio))
+                        else:
+                            self.download_sphere_view.set_offset_ratio(float(x_ratio))
                     except Exception:
                         pass
         except Exception:

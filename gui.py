@@ -104,7 +104,7 @@ class PlaceholderListWidget(QListWidget): # widget with placeholder text if empt
         super().paintEvent(event) # keep default painting behavior
         if self.count() == 0: # if list is empty, show placeholder
             painter = QPainter(self.viewport())
-            painter.setPen(Qt.gray)
+            painter.setPen(QColor(0, 255, 255))
             # Give the text some horizontal padding and wrap so it's never cut off
             rect = self.viewport().rect().adjusted(12, 0, -12, 0)
             flags = Qt.AlignCenter | Qt.TextWordWrap
@@ -1185,7 +1185,7 @@ class MainWindow(QMainWindow): # main app window
         output_tab_layout.addWidget(self.output_list)
         self.files_tabwidget.addTab(output_tab, "Output")
         fp_layout.addWidget(self.files_tabwidget)
-        cg.addWidget(files_panel, 0, 0, 10, 3)
+        cg.addWidget(files_panel, 0, 0, 7, 3)
         # Controls rows (split into two lines to avoid crowding)
         # Row A: Mode + GPU
         controls_top = QWidget(); ctop = QHBoxLayout(controls_top); ctop.setContentsMargins(8,0,8,0)
@@ -1202,7 +1202,7 @@ class MainWindow(QMainWindow): # main app window
         except Exception:
             pass
         ctop.addStretch(1)
-        cg.addWidget(controls_top, 10, 2, 1, 7)
+        cg.addWidget(controls_top, 8, 2, 1, 7)
 
         # Prepare output/quality widgets
         self.output_format_combo = QComboBox(); self.output_format_combo.setObjectName("OutputCombo"); self.populate_output_format_combo()
@@ -1239,7 +1239,7 @@ class MainWindow(QMainWindow): # main app window
         cmid.addSpacing(14)
         cmid.addWidget(QLabel("Quality:")); cmid.addWidget(self.quality_slider); cmid.addSpacing(6); cmid.addWidget(self.quality_value_label)
         cmid.addStretch(1)
-        cg.addWidget(controls_mid, 11, 2, 1, 7)
+        cg.addWidget(controls_mid, 9, 2, 1, 7)
 
         # Actions row: Convert / Stop centered
         self.convert_button = QPushButton("Convert"); self.convert_button.setObjectName("ActionButton"); self.convert_button.clicked.connect(self.start_conversion_queue)
@@ -1248,7 +1248,7 @@ class MainWindow(QMainWindow): # main app window
         ar.addStretch(1)
         ar.addWidget(self.convert_button); ar.addWidget(self.stop_button)
         ar.addStretch(1)
-        cg.addWidget(actions_row, 13, 2, 1, 7)
+        cg.addWidget(actions_row, 11, 2, 1, 7)
         # Convert trim widget (hidden by default)
         self.convert_trim_widget = QWidget(); ctwl = QHBoxLayout(self.convert_trim_widget); ctwl.setContentsMargins(8,0,8,0)
         self.convert_trim_label = QLabel("Trim Range:")
@@ -1266,7 +1266,7 @@ class MainWindow(QMainWindow): # main app window
         ctwl.addWidget(self.convert_trim_label); ctwl.addWidget(self.convert_trim_start_edit); ctwl.addWidget(self.convert_trim_to_label); ctwl.addWidget(self.convert_trim_end_edit); ctwl.addStretch(1)
         self.convert_trim_widget.hide()
         # Keep trim row left of the progress area to prevent any overlay
-        cg.addWidget(self.convert_trim_widget, 9, 2, 1, 7)
+        cg.addWidget(self.convert_trim_widget, 7, 2, 1, 7)
         # Output folder + buttons (top center)
         folder_container = QWidget(); fc = QVBoxLayout(folder_container); fc.setContentsMargins(8,0,8,0); fc.setSpacing(2)
         fr_top = QHBoxLayout(); fr_top.setContentsMargins(0,0,0,0)
@@ -1296,7 +1296,7 @@ class MainWindow(QMainWindow): # main app window
         self.current_progress_bar = QProgressBar(); self.current_progress_bar.setRange(0,100); self.current_progress_bar.setTextVisible(False)
         pl.addWidget(self.overall_progress_label); pl.addWidget(self.current_progress_bar)
         # Place progress directly below the Output controls
-        cg.addWidget(progress_panel, 12, 2, 1, 7)
+        cg.addWidget(progress_panel, 10, 2, 1, 7)
         # Right dock for Convert terminal
         self.convert_right_dock = QWidget(convert_overlay)
         self.convert_right_dock.setObjectName('rightDock')
@@ -1347,7 +1347,7 @@ class MainWindow(QMainWindow): # main app window
             # Push the sphere further right to open up left column
             self.download_sphere_view.set_offset_ratio(0.5)
         download_overlay = QWidget(self.download_tab); download_overlay.setAttribute(Qt.WA_StyledBackground, True); download_overlay.setStyleSheet("background: transparent;")
-        dg = QGridLayout(download_overlay); dg.setContentsMargins(24,12,24,24); dg.setHorizontalSpacing(16); dg.setVerticalSpacing(0)
+        dg = QGridLayout(download_overlay); dg.setContentsMargins(24,24,24,24); dg.setHorizontalSpacing(16); dg.setVerticalSpacing(12)
         try:
             stretch_map_d = {0:2, 1:2, 2:2, 3:3, 4:3, 5:3, 6:3, 7:2, 8:1, 9:1, 10:1}
             for col, val in stretch_map_d.items():
@@ -1463,6 +1463,13 @@ class MainWindow(QMainWindow): # main app window
         ts.addWidget(dl_controls)
         # Pin to the top-left to eliminate any centering when internal width changes
         dg.addWidget(top_stack, 0, 0, 1, 10, alignment=Qt.AlignLeft | Qt.AlignTop)
+        # Insert a spacer block to mirror the Convert tab's left files panel vertical footprint,
+        # so subsequent rows (trim/progress/actions) line up visually with Convert.
+        try:
+            spacer_top_area = QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding)
+            dg.addItem(spacer_top_area, 1, 0, 6, 10)
+        except Exception:
+            pass
         # Trim widget for download flows (hidden) inside a fixed-height container so
         # the overall layout below (progress bar) does not shift when toggled
         self.trim_widget = QWidget(); dltw = QHBoxLayout(self.trim_widget); dltw.setContentsMargins(8,0,8,0); dltw.setSpacing(6)
@@ -1478,16 +1485,16 @@ class MainWindow(QMainWindow): # main app window
             self.trim_container.setFixedHeight(max(34, self.trim_widget.sizeHint().height()))
         except Exception:
             self.trim_container.setFixedHeight(36)
-        # Place directly under the top stack with minimal gap
-        dg.addWidget(self.trim_container, 1, 0, 1, 10)
+        # Position to align with Convert tab's trim row
+        dg.addWidget(self.trim_container, 7, 0, 1, 10)
         # Add an expanding spacer below the trim container to push progress to the bottom consistently
         try:
-            spacer_bottom_push = QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding)
+            spacer_bottom_push = QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Minimum)
             dg.addItem(spacer_bottom_push, 2, 0, 1, 10)
         except Exception:
             pass
-        # Download button centered under progress (bottom area)
-        self.download_button = QPushButton("Download"); dg.addWidget(self.download_button, 21, 5, 1, 2, alignment=Qt.AlignCenter)
+        # Download button centered under progress (match Convert tab row/width)
+        self.download_button = QPushButton("Download"); dg.addWidget(self.download_button, 11, 2, 1, 7, alignment=Qt.AlignCenter)
         self.download_button.clicked.connect(self.start_download)
         # Right dock for Download terminal
         self.download_right_dock = QWidget(download_overlay)
@@ -1520,15 +1527,15 @@ class MainWindow(QMainWindow): # main app window
             self.download_mode_changed(self.download_mode_combo.currentIndex())
         except Exception:
             pass
-        # Progress (keep low/bottom to avoid overlap with sphere), align similar to Convert tab
-        self.download_progress_label = QLabel("Download Progress:")
+        # Progress (match Convert tab position and width)
+        self.download_progress_label = QLabel("Progress:")
         self.download_progress_bar = QProgressBar(); self.download_progress_bar.setRange(0,100); self.download_progress_bar.setTextVisible(False)
         download_progress_panel = QWidget(); dp = QVBoxLayout(download_progress_panel); dp.setContentsMargins(8,0,8,0); dp.setSpacing(2)
         dp.addWidget(self.download_progress_label); dp.addWidget(self.download_progress_bar)
-        dg.addWidget(download_progress_panel, 20, 0, 1, 10)
+        dg.addWidget(download_progress_panel, 10, 2, 1, 7)
         download_container = OverlayContainer(self.download_sphere_view, download_overlay, parent=self.download_tab)
-        # Pull all overlay content up to reduce the tall gap users reported
-        download_container.set_top_margin(6)
+        # Match top margin used by Convert tab for consistent vertical alignment
+        download_container.set_top_margin(20)
         # Keep references for centering in download tab
         self.download_overlay = download_overlay
         dl_container_layout = QVBoxLayout(self.download_tab)
@@ -2303,7 +2310,7 @@ class MainWindow(QMainWindow): # main app window
 
     @Slot(int)
     def update_download_progress(self, progress):
-        self.download_progress_label.setText(f"Download Progress: {progress}%")
+        self.download_progress_label.setText(f"Progress: {progress}%")
         self.download_progress_bar.setValue(progress)
         if hasattr(self, 'download_sphere_view'):
             try:
@@ -2392,7 +2399,7 @@ class MainWindow(QMainWindow): # main app window
         if hasattr(self, 'status_label'):
             self.status_label.setText("STATUS: DOWNLOAD COMPLETE")
         # Force progress to 100 on completion for consistent bar behavior (after any merge)
-        self.download_progress_label.setText("Download Progress: 100%")
+        self.download_progress_label.setText("Progress: 100%")
         self.download_progress_bar.setValue(100)
         mode = self.download_mode_combo.currentText()
         if mode == "Download & Convert":

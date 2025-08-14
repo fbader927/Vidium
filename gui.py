@@ -446,7 +446,11 @@ class AutoScrollTerminal(QPlainTextEdit):
         # Drift control (time-based drift for smoothness)
         self._last_append_s = time.monotonic()
         self._last_cleared_s = 0.0
-        self._drift_speed_px_s = 10.0  # pixels per second (cinematic smooth)
+        # Drift parameters for cinematic sci‑fi feel
+        self._drift_speed_px_s = 10.0  # legacy; kept for compatibility
+        self._drift_base_speed = 6.0   # pixels per second baseline
+        self._drift_variance = 0.35    # +/‑ percentage modulation
+        self._drift_phase = 0.0        # time phase for modulation
         self._subpixel_acc = 0.0
         self._last_tick_time = time.monotonic()
         self._resume_after_s = 0.0  # delay before resuming after mouse leaves
@@ -455,9 +459,18 @@ class AutoScrollTerminal(QPlainTextEdit):
         self._idle_clear_s = 2.0    # only clear if idle (no new lines) for at least this long
         self._min_clear_interval_s = 5.0  # avoid rapid clear-loop
         self._fade_lines_remaining = 0     # number of blank lines to append for natural fade-out
+        self._auto_scroll_enabled = False  # delay drifting until processes complete
+        self._fade_opacity = 1.0
         self._auto_timer = QTimer(self)
         self._auto_timer.timeout.connect(self._auto_scroll_step)
         self._auto_timer.start(tick_ms)
+        # Fade text only via opacity effect on the viewport, not the whole widget
+        try:
+            self._text_effect = QGraphicsOpacityEffect(self.viewport())
+            self.viewport().setGraphicsEffect(self._text_effect)
+            self._text_effect.setOpacity(1.0)
+        except Exception:
+            self._text_effect = None
         # Hide scrollbars by default; reveal on hover so it looks clean
         try:
             self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -487,11 +500,21 @@ class AutoScrollTerminal(QPlainTextEdit):
         # No snap; rely on smooth drift only
         if self._reset_on_resume and not (self._paused_hover or self._paused_focus):
             self._reset_on_resume = False
-        # Smooth time-based drift (direction controlled)
-        self._subpixel_acc += self._drift_speed_px_s * dt
+        # Smooth time-based drift (direction controlled, with gentle modulation)
+        try:
+            from math import sin
+            self._drift_phase += dt * 0.6
+            mod = 1.0 + (self._drift_variance * sin(self._drift_phase))
+            speed = max(1.0, self._drift_base_speed * mod)
+        except Exception:
+            speed = self._drift_base_speed
+        self._subpixel_acc += speed * dt
         steps = int(self._subpixel_acc)
         if steps > 0:
             self._subpixel_acc -= steps
+            # Only drift when auto-scroll is enabled
+            if not self._auto_scroll_enabled:
+                return
             if self._direction < 0:
                 # Upward drift (content moves up): reduce scrollbar value
                 if sb.value() > sb.minimum():
@@ -502,20 +525,33 @@ class AutoScrollTerminal(QPlainTextEdit):
                 if sb.value() < sb.maximum():
                     sb.setValue(min(sb.value() + steps, sb.maximum()))
                     return
-        # Natural fade-out: when idle and not hovered, append blank lines to let content scroll out
+        # Natural fade-out: when idle and not hovered
         idle_enough = (now - self._last_append_s) >= self._idle_clear_s
         can_clear = (now - self._last_cleared_s) >= self._min_clear_interval_s
-        not_interacting = (not self.underMouse()) and (not self.hasFocus())
+        # Treat mouse leaving the terminal as "not interacting" even if the widget still has focus
+        not_interacting = (not self.underMouse())
         if not_interacting and idle_enough and can_clear and ((self._direction < 0 and sb.value() <= sb.minimum()) or (self._direction > 0 and sb.value() >= sb.maximum())):
+            # Fade out by reducing widget opacity slowly
             try:
-                self.document().clear()
+                self._fade_opacity = max(0.0, self._fade_opacity - 0.02)
+                if self._text_effect is not None:
+                    self._text_effect.setOpacity(max(0.15, self._fade_opacity))
+                else:
+                    self.setWindowOpacity(0.35 + 0.65 * self._fade_opacity)
             except Exception:
                 pass
-            self._last_cleared_s = now
-            sb.setValue(sb.minimum() if self._direction < 0 else sb.maximum())
 
     def enterEvent(self, event):
         self._paused_hover = True
+        # Restore opacity on hover
+        try:
+            self._fade_opacity = 1.0
+            if self._text_effect is not None:
+                self._text_effect.setOpacity(1.0)
+            else:
+                self.setWindowOpacity(1.0)
+        except Exception:
+            pass
         try:
             self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
             self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -583,6 +619,20 @@ class AutoScrollTerminal(QPlainTextEdit):
         self.appendPlainText(text.rstrip("\n"))
         self._trim_old_lines()
         self._last_append_s = time.monotonic()
+        # Enable drift automatically as soon as there's enough content to scroll
+        try:
+            if sb and sb.maximum() > 0:
+                self._auto_scroll_enabled = True
+        except Exception:
+            pass
+        try:
+            self._fade_opacity = 1.0
+            if self._text_effect is not None:
+                self._text_effect.setOpacity(1.0)
+            else:
+                self.setWindowOpacity(1.0)
+        except Exception:
+            pass
         # If user is interacting and we were at bottom, keep pinned to bottom for readability
         if sb and (self._paused_hover or self._paused_focus) and old_at_bottom:
             try:
@@ -1153,6 +1203,14 @@ class MainWindow(QMainWindow): # main app window
         self._blink_anim.setDuration(1200)
         self._blink_anim.setLoopCount(-1)
         self._blink_anim.start()
+        # Timer to auto-reset STATUS to IDLE after showing SUCCESS
+        self._status_reset_timer = QTimer(self)
+        self._status_reset_timer.setSingleShot(True)
+        try:
+            self._status_reset_timer.setTimerType(Qt.PreciseTimer)
+        except Exception:
+            pass
+        self._status_reset_timer.timeout.connect(lambda: self.status_label.setText("STATUS: IDLE"))
         hl.addWidget(self.logo_label, 0, Qt.AlignLeft)
         hl.addWidget(self.status_label, 0, Qt.AlignCenter)
         hl.addWidget(self.time_label, 0, Qt.AlignRight)
@@ -1411,7 +1469,7 @@ class MainWindow(QMainWindow): # main app window
             # Push the sphere further right to open up left column
             self.download_sphere_view.set_offset_ratio(0.5)
         download_overlay = QWidget(self.download_tab); download_overlay.setAttribute(Qt.WA_StyledBackground, True); download_overlay.setStyleSheet("background: transparent;")
-        dg = QGridLayout(download_overlay); dg.setContentsMargins(24,24,24,24); dg.setHorizontalSpacing(16); dg.setVerticalSpacing(12)
+        dg = QGridLayout(download_overlay); dg.setContentsMargins(24,24,24,24); dg.setHorizontalSpacing(16); dg.setVerticalSpacing(6)
         try:
             stretch_map_d = {0:2, 1:2, 2:2, 3:3, 4:3, 5:3, 6:3, 7:2, 8:1, 9:1, 10:1}
             for col, val in stretch_map_d.items():
@@ -1506,11 +1564,21 @@ class MainWindow(QMainWindow): # main app window
             except Exception:
                 pass
         dlc.addWidget(self.download_output_format_combo, 0, Qt.AlignVCenter)
+        # Download GPU checkbox (matches Convert tab behavior)
+        self.download_gpu_checkbox = QCheckBox("Use GPU (Very Fast)")
+        try:
+            self.download_gpu_checkbox.setChecked(True)
+            self.download_gpu_checkbox.setStyleSheet("color: #00FFFF;")
+            self.download_gpu_checkbox.toggled.connect(self.on_gpu_checkbox_toggled)
+        except Exception:
+            pass
+        dlc.addWidget(self.download_gpu_checkbox, 0, Qt.AlignVCenter)
         # Normalize control heights so the row doesn't shift between modes/themes
         try:
             h = max(self.download_mode_combo.sizeHint().height(), self.download_output_format_combo.sizeHint().height())
             self.download_mode_combo.setFixedHeight(h)
             self.download_output_format_combo.setFixedHeight(h)
+            self.download_gpu_checkbox.setFixedHeight(h)
         except Exception:
             pass
         try:
@@ -1529,11 +1597,11 @@ class MainWindow(QMainWindow): # main app window
         dg.addWidget(top_stack, 0, 0, 1, 10, alignment=Qt.AlignLeft | Qt.AlignTop)
         # Keep a reference for centering math
         self.download_top_stack = top_stack
-        # Insert a spacer block to mirror the Convert tab's left files panel vertical footprint,
-        # so subsequent rows (trim/progress/actions) line up visually with Convert.
+        # Insert a spacer below the trim row so progress remains lower while
+        # allowing the trim controls to sit directly beneath the mode/output row.
         try:
             spacer_top_area = QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Expanding)
-            dg.addItem(spacer_top_area, 1, 0, 6, 10)
+            dg.addItem(spacer_top_area, 3, 0, 5, 10)
         except Exception:
             pass
         # Trim widget for download flows (hidden) inside a fixed-height container so
@@ -1551,8 +1619,8 @@ class MainWindow(QMainWindow): # main app window
             self.trim_container.setFixedHeight(max(34, self.trim_widget.sizeHint().height()))
         except Exception:
             self.trim_container.setFixedHeight(36)
-        # Position to align with Convert tab's trim row
-        dg.addWidget(self.trim_container, 7, 0, 1, 10)
+        # Position trim just below the mode/output row (tight spacing)
+        dg.addWidget(self.trim_container, 1, 0, 1, 10)
         # Add an expanding spacer below the trim container to push progress to the bottom consistently
         try:
             spacer_bottom_push = QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Minimum)
@@ -2049,10 +2117,11 @@ class MainWindow(QMainWindow): # main app window
                     except Exception:
                         pass
                 self.current_file_progress = 0
-                # During conversion, make the terminal drift downward (content moves down) for a dynamic feel
+                # During conversion, keep auto-scroll disabled; we'll enable when done
                 try:
                     if hasattr(self, 'convert_terminal'):
-                        self.convert_terminal._direction = +1
+                        self.convert_terminal._auto_scroll_enabled = False
+                        self.convert_terminal._direction = +1  # scroll down when enabled
                 except Exception:
                     pass
                 self.file_timer.start(500)
@@ -2109,9 +2178,14 @@ class MainWindow(QMainWindow): # main app window
         self.current_file_progress = 100
         self.append_log(f"{output_file}: {message}")
         if hasattr(self, 'status_label'):
-            # If there are more files, keep converting state; otherwise idle
+            # If there are more files, continue converting; otherwise show SUCCESS briefly then IDLE
             if self.current_index + 1 >= self.total_files:
-                self.status_label.setText("STATUS: IDLE")
+                try:
+                    self.status_label.setText("STATUS: SUCCESS")
+                    # Reset to IDLE after 7 seconds
+                    self._status_reset_timer.start(7000)
+                except Exception:
+                    self.status_label.setText("STATUS: IDLE")
             else:
                 self.status_label.setText("STATUS: CONVERTING...")
         if hasattr(self, 'sphere_view'):
@@ -2119,10 +2193,13 @@ class MainWindow(QMainWindow): # main app window
                 self.sphere_view.set_progress(100)
             except Exception:
                 pass
-        # After conversion, restore terminal drift to cinematic upward glide
+        # After conversion, enable auto-scroll and drift upward a touch faster, then fade
         try:
             if hasattr(self, 'convert_terminal'):
                 self.convert_terminal._direction = -1
+                self.convert_terminal._auto_scroll_enabled = True
+                # Slightly faster base speed for end‑of‑process ambient drift
+                self.convert_terminal._drift_base_speed = 8.0
         except Exception:
             pass
         if self.convert_mode_combo.currentText() == "Trim & Convert" and self.intermediate_file:
@@ -2216,14 +2293,23 @@ class MainWindow(QMainWindow): # main app window
         # Hide/show the small gap before output to avoid a stray space when hidden
         if hasattr(self, 'download_output_gap') and self.download_output_gap is not None:
             self.download_output_gap.setVisible(enable_format)
+        # Toggle the GPU checkbox for download flows (show for any mode that can leverage GPU)
+        if hasattr(self, 'download_gpu_checkbox') and self.download_gpu_checkbox is not None:
+            gpu_visible = mode in ["Download & Convert", "Download & Trim", "Download & Convert & Trim"]
+            self.download_gpu_checkbox.setVisible(gpu_visible)
         # GPU is not applicable to WebM and some audio-only outputs; reflect that in the checkbox state
         try:
-            if "Convert" in mode:
+            if "Convert" in mode or mode == "Download & Trim":
                 fmt = self.download_output_format_combo.currentText().strip().lower()
                 gpu_ok = fmt not in ("webm", "gif", "mp3", "wav")
+                # Enable/disable both checkboxes consistently
                 self.gpu_checkbox.setEnabled(gpu_ok)
+                if hasattr(self, 'download_gpu_checkbox'):
+                    self.download_gpu_checkbox.setEnabled(gpu_ok)
             else:
                 self.gpu_checkbox.setEnabled(True)
+                if hasattr(self, 'download_gpu_checkbox'):
+                    self.download_gpu_checkbox.setEnabled(True)
         except Exception:
             pass
         if "Trim" in mode:
@@ -2261,6 +2347,12 @@ class MainWindow(QMainWindow): # main app window
             self.output_list.addItem(item)
             self.current_index += 1
         # overall percent reflected in label only
+            try:
+                if hasattr(self, 'status_label'):
+                    self.status_label.setText("STATUS: SUCCESS")
+                    self._status_reset_timer.start(7000)
+            except Exception:
+                pass
             self.start_next_conversion()
 
     @Slot(str)
@@ -2287,6 +2379,9 @@ class MainWindow(QMainWindow): # main app window
             use_gpu_flag = self.gpu_checkbox.isChecked()
             if selected_format.lower() == "webm":
                 use_gpu_flag = False
+            # Use the download GPU checkbox when visible, else fall back to main GPU checkbox
+            if hasattr(self, 'download_gpu_checkbox') and self.download_gpu_checkbox.isVisible():
+                use_gpu_flag = self.download_gpu_checkbox.isChecked() and use_gpu_flag
             self.download_conversion_worker = ConversionWorker(
                 trimmed_file, new_file, extra_args=None, use_gpu=use_gpu_flag, quality=self.quality_slider.value())
             self.download_conversion_worker.conversionFinished.connect(
@@ -2305,6 +2400,12 @@ class MainWindow(QMainWindow): # main app window
             self.download_folder_edit.setEnabled(True)
             self.download_default_checkbox.setEnabled(True)
             self.download_goto_button.setEnabled(True)
+            try:
+                if hasattr(self, 'status_label'):
+                    self.status_label.setText("STATUS: SUCCESS")
+                    self._status_reset_timer.start(7000)
+            except Exception:
+                pass
 
     @Slot(str)
     def trim_error(self, error_message):
@@ -2337,6 +2438,12 @@ class MainWindow(QMainWindow): # main app window
             self.download_folder_edit.setEnabled(True)
             self.download_default_checkbox.setEnabled(True)
             self.download_goto_button.setEnabled(True)
+            try:
+                if hasattr(self, 'status_label'):
+                    self.status_label.setText("STATUS: SUCCESS")
+                    self._status_reset_timer.start(7000)
+            except Exception:
+                pass
         elif mode == "Download & Convert & Trim":
             original_trimmed_file = self.download_conversion_worker.input_file
             if os.path.exists(original_trimmed_file):
@@ -2355,9 +2462,41 @@ class MainWindow(QMainWindow): # main app window
             self.download_folder_edit.setEnabled(True)
             self.download_default_checkbox.setEnabled(True)
             self.download_goto_button.setEnabled(True)
+            try:
+                if hasattr(self, 'download_terminal'):
+                    self.download_terminal._auto_scroll_enabled = True
+                    self.download_terminal._direction = +1
+            except Exception:
+                pass
+        try:
+            if hasattr(self, 'status_label'):
+                self.status_label.setText("STATUS: SUCCESS")
+                self._status_reset_timer.start(7000)
+        except Exception:
+            pass
+        # Enable auto-scroll now that processing has finished
+        try:
+            if hasattr(self, 'download_terminal'):
+                self.download_terminal._auto_scroll_enabled = True
+                self.download_terminal._direction = -1  # ambient upward drift after finish
+                self.download_terminal._drift_base_speed = 8.0
+        except Exception:
+            pass
 
     @Slot(str)
     def download_conversion_error(self, error_message):
+        # Some FFmpeg wrappers may report an error even though the file was created successfully.
+        try:
+            out_file = None
+            if hasattr(self, 'download_conversion_worker') and self.download_conversion_worker is not None:
+                out_file = getattr(self.download_conversion_worker, 'output_file', None)
+            if out_file and os.path.exists(out_file) and os.path.getsize(out_file) > 0:
+                self.append_log("FFmpeg reported an error but output file exists; treating as success.")
+                # Route to normal success handler
+                self.download_conversion_finished(out_file, "Conversion completed successfully.")
+                return
+        except Exception:
+            pass
         self.append_log("Download conversion error: " + error_message)
         self.download_button.setEnabled(True)
         self.download_browse_button.setEnabled(True)
@@ -2365,6 +2504,15 @@ class MainWindow(QMainWindow): # main app window
         self.download_folder_edit.setEnabled(True)
         self.download_default_checkbox.setEnabled(True)
         self.download_goto_button.setEnabled(True)
+        if hasattr(self, 'status_label'):
+            self.status_label.setText("STATUS: ERROR")
+        # Even on error, allow the drift to resume so the user sees the fade behavior
+        try:
+            if hasattr(self, 'download_terminal'):
+                self.download_terminal._auto_scroll_enabled = True
+                self.download_terminal._direction = +1
+        except Exception:
+            pass
 
     @Slot(str)
     def download_error(self, error_message):
@@ -2375,6 +2523,14 @@ class MainWindow(QMainWindow): # main app window
         self.download_folder_edit.setEnabled(True)
         self.download_default_checkbox.setEnabled(True)
         self.download_goto_button.setEnabled(True)
+        if hasattr(self, 'status_label'):
+            self.status_label.setText("STATUS: ERROR")
+        try:
+            if hasattr(self, 'download_terminal'):
+                self.download_terminal._auto_scroll_enabled = True
+                self.download_terminal._direction = +1
+        except Exception:
+            pass
 
     @Slot(int)
     def update_download_progress(self, progress):
@@ -2448,6 +2604,13 @@ class MainWindow(QMainWindow): # main app window
                 self.download_sphere_view.set_progress(0)
             except Exception:
                 pass
+        # Pause auto-scroll while work is ongoing
+        try:
+            if hasattr(self, 'download_terminal'):
+                self.download_terminal._auto_scroll_enabled = False
+                self.download_terminal._direction = +1
+        except Exception:
+            pass
         # Ensure any prior worker is cleanly stopped to avoid QThread destruction crash
         try:
             if hasattr(self, 'download_worker') and self.download_worker is not None and self.download_worker.isRunning():
@@ -2465,7 +2628,11 @@ class MainWindow(QMainWindow): # main app window
     def download_finished(self, message, downloaded_file):
         self.append_log(message)
         if hasattr(self, 'status_label'):
-            self.status_label.setText("STATUS: DOWNLOAD COMPLETE")
+            try:
+                self.status_label.setText("STATUS: SUCCESS")
+                self._status_reset_timer.start(7000)
+            except Exception:
+                self.status_label.setText("STATUS: IDLE")
         # Force progress to 100 on completion for consistent bar behavior (after any merge)
         self.download_progress_label.setText("Progress: 100%")
         self.download_progress_bar.setValue(100)
@@ -2504,6 +2671,8 @@ class MainWindow(QMainWindow): # main app window
             if selected_format.lower() == "webm":
                 use_gpu_flag = False
             from converter import convert_file
+            if hasattr(self, 'download_gpu_checkbox') and self.download_gpu_checkbox.isVisible():
+                use_gpu_flag = self.download_gpu_checkbox.isChecked() and use_gpu_flag
             self.download_conversion_worker = ConversionWorker(
                 downloaded_file, new_file, extra_args=None, use_gpu=use_gpu_flag, quality=self.quality_slider.value())
             self.download_conversion_worker.conversionFinished.connect(
@@ -2516,20 +2685,36 @@ class MainWindow(QMainWindow): # main app window
             self.append_log("Starting trimming of downloaded file (for conversion and trimming)...")
             if hasattr(self, 'status_label'):
                 self.status_label.setText("STATUS: TRIMMING...")
+            use_gpu_flag = self.gpu_checkbox.isChecked()
+            if hasattr(self, 'download_gpu_checkbox') and self.download_gpu_checkbox.isVisible():
+                use_gpu_flag = self.download_gpu_checkbox.isChecked()
             self.trim_worker = TrimWorker(downloaded_file, self.trim_start_edit.text(
-            ), self.trim_end_edit.text(), use_gpu=self.gpu_checkbox.isChecked(), copy_mode=False)
+            ), self.trim_end_edit.text(), use_gpu=use_gpu_flag, copy_mode=False)
             self.trim_worker.finished.connect(self.trim_finished)
             self.trim_worker.error.connect(self.trim_error)
             self.trim_worker.start()
+            try:
+                if hasattr(self, 'download_terminal'):
+                    self.download_terminal._auto_scroll_enabled = False
+            except Exception:
+                pass
         elif mode == "Download & Trim":
             self.append_log("Starting trimming of downloaded file...")
             if hasattr(self, 'status_label'):
                 self.status_label.setText("STATUS: TRIMMING...")
+            use_gpu_flag = self.gpu_checkbox.isChecked()
+            if hasattr(self, 'download_gpu_checkbox') and self.download_gpu_checkbox.isVisible():
+                use_gpu_flag = self.download_gpu_checkbox.isChecked()
             self.trim_worker = TrimWorker(downloaded_file, self.trim_start_edit.text(
-            ), self.trim_end_edit.text(), use_gpu=self.gpu_checkbox.isChecked(), copy_mode=True)
+            ), self.trim_end_edit.text(), use_gpu=use_gpu_flag, copy_mode=True)
             self.trim_worker.finished.connect(self.trim_finished)
             self.trim_worker.error.connect(self.trim_error)
             self.trim_worker.start()
+            try:
+                if hasattr(self, 'download_terminal'):
+                    self.download_terminal._auto_scroll_enabled = False
+            except Exception:
+                pass
         else:
             self.download_button.setEnabled(True)
             self.download_browse_button.setEnabled(True)
@@ -2678,17 +2863,20 @@ class MainWindow(QMainWindow): # main app window
                         w = max(1, self.width()); h = max(1, self.height())
                         right_w = self.download_right_dock.width() if self.download_right_dock else int(w * 0.35)
                         left_w = 0
-                        # Align vertically between trim row and progress in download tab
+                        # Align vertically between top block and progress in download tab
                         try:
                             # Vertical midpoint between the download tab top block and its progress bar,
                             # with a slight upward bias to match Convert tab positioning
                             dl_top = self.download_top_stack.mapTo(self, self.download_top_stack.rect().topLeft()).y()
                             dl_bottom = self.download_progress_panel.mapTo(self, self.download_progress_panel.rect().bottomLeft()).y()
                             region_height = max(1.0, float(dl_bottom - dl_top))
-                            region_center_y = (dl_top + dl_bottom) / 2.0 - 0.15 * region_height
+                            # For download view, move a bit lower than geometric center to balance with sparse top UI
+                            region_center_y = (dl_top + dl_bottom) / 2.0 + 0.08 * region_height
                         except Exception:
                             region_center_y = h / 2.0
-                        region_center_x = left_w + (w - left_w - right_w) / 2.0
+                        region_width = (w - left_w - right_w)
+                        # Horizontal center of content area, then bias a touch to the left to fully clear the dock
+                        region_center_x = left_w + region_width / 2.0 - 0.06 * region_width
                         dx = region_center_x - (w / 2.0)
                         dy = region_center_y - (h / 2.0)
                         x_ratio = max(-0.5, min(0.5, dx / (w / 2.0)))

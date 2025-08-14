@@ -1215,6 +1215,9 @@ class MainWindow(QMainWindow): # main app window
         hl.addWidget(self.status_label, 0, Qt.AlignCenter)
         hl.addWidget(self.time_label, 0, Qt.AlignRight)
         main_layout.addWidget(header)
+        # Staged progress for Download tab
+        self._dl_stage = 0
+        self._dl_boundaries = [0, 100]
         # Simple preview area to back media_player usage
         self.video_widget = QVideoWidget()
         self.media_player = QMediaPlayer()
@@ -1691,7 +1694,7 @@ class MainWindow(QMainWindow): # main app window
         self.download_browse_button.clicked.connect(self.browse_download_folder)
         self.download_default_checkbox.stateChanged.connect(self.download_default_checkbox_changed)
         self.download_goto_button.clicked.connect(self.goto_download_folder)
-        self.download_button.clicked.connect(self.start_download)
+        # Avoid duplicate connections
         # Apply visual style
         self.apply_sci_fi_styles()
         self.apply_cabinet_styles()
@@ -2389,6 +2392,14 @@ class MainWindow(QMainWindow): # main app window
             self.download_conversion_worker.conversionError.connect(
                 self.download_conversion_error)
             self.download_conversion_worker.logMessage.connect(self.append_log)
+            try:
+                # Move to stage 2 for 3-stage flow (or stage 1 for 2-stage flows)
+                self._dl_stage = 2 if len(getattr(self, '_dl_boundaries', [0,100])) == 4 else 1
+                if hasattr(self, 'status_label'):
+                    self.status_label.setText("STATUS: CONVERTING...")
+                self.download_conversion_worker.progressUpdated.connect(self._on_download_conversion_progress)
+            except Exception:
+                pass
             self.download_conversion_worker.start()
         elif mode == "Download & Trim":
             item = QListWidgetItem(os.path.basename(trimmed_file))
@@ -2404,6 +2415,14 @@ class MainWindow(QMainWindow): # main app window
                 if hasattr(self, 'status_label'):
                     self.status_label.setText("STATUS: SUCCESS")
                     self._status_reset_timer.start(7000)
+            except Exception:
+                pass
+            # Complete progress for 2-stage flow
+            try:
+                self.download_progress_label.setText("Progress: 100%")
+                self.download_progress_bar.setValue(100)
+                if hasattr(self, 'download_sphere_view'):
+                    self.download_sphere_view.set_progress(100)
             except Exception:
                 pass
 
@@ -2482,6 +2501,54 @@ class MainWindow(QMainWindow): # main app window
                 self.download_terminal._drift_base_speed = 8.0
         except Exception:
             pass
+        # Ensure progress shows 100% on completion of last stage
+        try:
+            self.download_progress_label.setText("Progress: 100%")
+            self.download_progress_bar.setValue(100)
+            if hasattr(self, 'download_sphere_view'):
+                self.download_sphere_view.set_progress(100)
+        except Exception:
+            pass
+
+    @Slot(int)
+    def _on_download_conversion_progress(self, pct: int):
+        try:
+            b = getattr(self, '_dl_boundaries', [0, 100])
+            stage_index = 1 if len(b) == 3 else 2
+            start = b[min(stage_index, len(b)-1)]
+            end = b[min(stage_index + 1, len(b)-1)] if stage_index + 1 < len(b) else 100
+            scaled = int(start + (end - start) * max(0, min(100, int(pct))) / 100.0)
+        except Exception:
+            scaled = max(0, min(100, int(pct)))
+        try:
+            self.download_progress_label.setText(f"Progress: {scaled}%")
+            self.download_progress_bar.setValue(scaled)
+            if hasattr(self, 'download_sphere_view'):
+                self.download_sphere_view.set_progress(scaled)
+            if hasattr(self, 'status_label'):
+                self.status_label.setText(f"STATUS: CONVERTING... {scaled}%")
+        except Exception:
+            pass
+
+    @Slot(int)
+    def _on_download_trim_progress(self, pct: int):
+        try:
+            b = getattr(self, '_dl_boundaries', [0, 100])
+            stage_index = 1
+            start = b[min(stage_index, len(b)-1)]
+            end = b[min(stage_index + 1, len(b)-1)] if stage_index + 1 < len(b) else 100
+            scaled = int(start + (end - start) * max(0, min(100, int(pct))) / 100.0)
+        except Exception:
+            scaled = max(0, min(100, int(pct)))
+        try:
+            self.download_progress_label.setText(f"Progress: {scaled}%")
+            self.download_progress_bar.setValue(scaled)
+            if hasattr(self, 'download_sphere_view'):
+                self.download_sphere_view.set_progress(scaled)
+            if hasattr(self, 'status_label'):
+                self.status_label.setText(f"STATUS: TRIMMING... {scaled}%")
+        except Exception:
+            pass
 
     @Slot(str)
     def download_conversion_error(self, error_message):
@@ -2534,18 +2601,25 @@ class MainWindow(QMainWindow): # main app window
 
     @Slot(int)
     def update_download_progress(self, progress):
-        self.download_progress_label.setText(f"Progress: {progress}%")
-        self.download_progress_bar.setValue(progress)
+        try:
+            b = getattr(self, '_dl_boundaries', [0, 100])
+            s = max(0, min(getattr(self, '_dl_stage', 0), max(0, len(b) - 2)))
+            start = b[s]; end = b[s+1]
+            scaled = int(start + (end - start) * max(0, min(100, int(progress))) / 100.0)
+        except Exception:
+            scaled = max(0, min(100, int(progress)))
+        self.download_progress_label.setText(f"Progress: {scaled}%")
+        self.download_progress_bar.setValue(scaled)
         if hasattr(self, 'download_sphere_view'):
             try:
-                self.download_sphere_view.set_progress(progress)
+                self.download_sphere_view.set_progress(scaled)
             except Exception:
                 pass
         if hasattr(self, 'status_label'):
-            self.status_label.setText(f"STATUS: DOWNLOADING... {progress}%")
+            self.status_label.setText(f"STATUS: DOWNLOADING... {scaled}%")
         if hasattr(self, 'sphere_view'):
             try:
-                self.sphere_view.set_progress(progress)
+                self.sphere_view.set_progress(scaled)
             except Exception:
                 pass
 
@@ -2604,6 +2678,19 @@ class MainWindow(QMainWindow): # main app window
                 self.download_sphere_view.set_progress(0)
             except Exception:
                 pass
+        # Initialize staged boundaries based on selected mode
+        try:
+            mode = self.download_mode_combo.currentText()
+            if mode == "Download Only":
+                self._dl_boundaries = [0, 100]
+            elif mode in ("Download & Convert", "Download & Trim"):
+                self._dl_boundaries = [0, 50, 100]
+            else:
+                self._dl_boundaries = [0, 33, 66, 100]
+            self._dl_stage = 0
+        except Exception:
+            self._dl_boundaries = [0, 100]
+            self._dl_stage = 0
         # Pause auto-scroll while work is ongoing
         try:
             if hasattr(self, 'download_terminal'):
@@ -2622,6 +2709,10 @@ class MainWindow(QMainWindow): # main app window
         self.download_worker.finished.connect(self.download_finished)
         self.download_worker.error.connect(self.download_error)
         self.download_worker.progress.connect(self.update_download_progress)
+        try:
+            self.download_worker.logMessage.connect(self.append_log)
+        except Exception:
+            pass
         self.download_worker.start()
 
     @Slot(str, str)
@@ -2633,9 +2724,19 @@ class MainWindow(QMainWindow): # main app window
                 self._status_reset_timer.start(7000)
             except Exception:
                 self.status_label.setText("STATUS: IDLE")
-        # Force progress to 100 on completion for consistent bar behavior (after any merge)
-        self.download_progress_label.setText("Progress: 100%")
-        self.download_progress_bar.setValue(100)
+        # Advance to boundary of stage 0 (or 100% for single-stage)
+        try:
+            b = getattr(self, '_dl_boundaries', [0, 100])
+            boundary = b[1] if len(b) > 2 else 100
+            self.download_progress_label.setText(f"Progress: {int(boundary)}%")
+            self.download_progress_bar.setValue(int(boundary))
+            if hasattr(self, 'download_sphere_view'):
+                try:
+                    self.download_sphere_view.set_progress(int(boundary))
+                except Exception:
+                    pass
+        except Exception:
+            pass
         mode = self.download_mode_combo.currentText()
         if mode == "Download & Convert":
             selected_format = self.download_output_format_combo.currentText().strip()
@@ -2647,6 +2748,13 @@ class MainWindow(QMainWindow): # main app window
                 item = QListWidgetItem(os.path.basename(downloaded_file))
                 item.setData(Qt.UserRole, downloaded_file)
                 self.output_list.addItem(item)
+                try:
+                    self.download_progress_label.setText("Progress: 100%")
+                    self.download_progress_bar.setValue(100)
+                    if hasattr(self, 'download_sphere_view'):
+                        self.download_sphere_view.set_progress(100)
+                except Exception:
+                    pass
                 self.download_button.setEnabled(True)
                 self.download_browse_button.setEnabled(True)
                 self.video_url_edit.setEnabled(True)
@@ -2680,6 +2788,12 @@ class MainWindow(QMainWindow): # main app window
             self.download_conversion_worker.conversionError.connect(
                 self.download_conversion_error)
             self.download_conversion_worker.logMessage.connect(self.append_log)
+            try:
+                self._dl_stage = 1
+                self.status_label.setText("STATUS: CONVERTING...")
+                self.download_conversion_worker.progressUpdated.connect(self._on_download_conversion_progress)
+            except Exception:
+                pass
             self.download_conversion_worker.start()
         elif mode == "Download & Convert & Trim":
             self.append_log("Starting trimming of downloaded file (for conversion and trimming)...")
@@ -2692,6 +2806,11 @@ class MainWindow(QMainWindow): # main app window
             ), self.trim_end_edit.text(), use_gpu=use_gpu_flag, copy_mode=False)
             self.trim_worker.finished.connect(self.trim_finished)
             self.trim_worker.error.connect(self.trim_error)
+            try:
+                self._dl_stage = 1
+                self.trim_worker.progress.connect(self._on_download_trim_progress)
+            except Exception:
+                pass
             self.trim_worker.start()
             try:
                 if hasattr(self, 'download_terminal'):
@@ -2709,6 +2828,11 @@ class MainWindow(QMainWindow): # main app window
             ), self.trim_end_edit.text(), use_gpu=use_gpu_flag, copy_mode=True)
             self.trim_worker.finished.connect(self.trim_finished)
             self.trim_worker.error.connect(self.trim_error)
+            try:
+                self._dl_stage = 1
+                self.trim_worker.progress.connect(self._on_download_trim_progress)
+            except Exception:
+                pass
             self.trim_worker.start()
             try:
                 if hasattr(self, 'download_terminal'):

@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QGroupBox, QStyle, QTabWidget, QStatusBar, QSpacerItem, QGraphicsOpacityEffect,
     QStackedLayout, QGridLayout
 )
-from PySide6.QtGui import QStandardItemModel, QStandardItem, QFont, QPainter, QIcon, QColor, QPen
+from PySide6.QtGui import QStandardItemModel, QStandardItem, QFont, QPainter, QIcon, QColor, QPen, QTextDocument
 from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer, QSettings, QPoint, QUrl, QSize, QEvent, QPropertyAnimation, QCoreApplication
 from PySide6.QtCore import QRectF
 try:
@@ -721,7 +721,7 @@ class AutoScrollTerminal(QPlainTextEdit):
                 pass
 
 def _build_html(self) -> str:
-    return r"""
+	return r"""
 <!DOCTYPE html>
 <html lang='en'>
 <head>
@@ -781,6 +781,16 @@ def _build_html(self) -> str:
     group.add(innerSphere);
 
     let progress = 0; // 0..100
+    let _progressTarget = 0; // target percent
+    let _progressDisplay = 0; // smoothed percent
+    let _numStages = 1; // 1..3
+    let _stageIndex = 0; // 0-based
+    let _flashActive = false; let _flashEndAt = 0; let _flashPhase = 0;
+    const _fullnessByStages = { 1:[1.0], 2:[0.65, 1.0], 3:[0.5, 0.8, 1.15] };
+    function _currentFullness(){ const arr = _fullnessByStages[_numStages] || _fullnessByStages[1]; const i = Math.max(0, Math.min(arr.length-1, _stageIndex|0)); return arr[i]; }
+    function _triggerFlash(){ _flashActive = true; _flashEndAt = performance.now() + (3000 + Math.random()*2000); _flashPhase = 0; }
+    function _resetVisuals(){ _flashActive=false; _flashEndAt=0; _flashPhase=0; _progressTarget=0; _progressDisplay=0; innerMaterial.opacity=0.18; innerMaterial.color.setHex(0x0077FF); innerSphere.scale.set(0.95,0.95,0.95); }
+
     let offsetRatio = 0.0; // -0.5..0.5
     function buildGrid(){ const overlay = document.getElementById('grid'); if (overlay) overlay.innerHTML=''; }
     // Fixed-size canvas cap: never exceed half the window's smaller dimension
@@ -800,11 +810,48 @@ def _build_html(self) -> str:
       applyCanvasOffset();
     }
     const clock = new THREE.Clock();
-    function animate(){ requestAnimationFrame(animate); const dt = clock.getDelta(); group.rotation.x += 0.8*dt; group.rotation.y += 1.2*dt; const t = clock.elapsedTime; const pulse = 0.95 + 0.03*Math.sin(t); innerSphere.scale.set(pulse,pulse,pulse); renderer.render(scene,camera); }
+    let _lastTick = performance.now();
+    function animate(){
+      requestAnimationFrame(animate);
+      const now = performance.now();
+      const dtReal = Math.min(0.05, (now - _lastTick)/1000.0);
+      _lastTick = now;
+      // Smoothly approach target (percent per second speed scaled by gap)
+      const gap = _progressTarget - _progressDisplay;
+      const speed = Math.max(12.0, Math.abs(gap) * 2.2);
+      const step = Math.sign(gap) * speed * dtReal;
+      if (Math.abs(step) >= Math.abs(gap)) _progressDisplay = _progressTarget; else _progressDisplay += step;
+      // Rotation & pulse
+      const dt = clock.getDelta(); group.rotation.x += 0.8*dt; group.rotation.y += 1.2*dt; const t = clock.elapsedTime;
+      const basePulse = 0.95 + 0.03*Math.sin(t);
+      // Fullness-driven opacity
+      const fullness = _currentFullness();
+      const fillAlpha = 0.12 + 0.6 * (Math.max(0, Math.min(100, _progressDisplay))/100.0) * fullness;
+      innerMaterial.opacity = Math.max(0.12, Math.min(0.98, fillAlpha));
+      innerSphere.scale.set(basePulse, basePulse, basePulse);
+      // Brilliant flash on completion
+      if (!_flashActive && _progressTarget >= 100){ _triggerFlash(); }
+      if (_flashActive){
+        _flashPhase += dtReal * 8.0;
+        const flashPulse = 0.7 + 0.3 * Math.sin(_flashPhase) + 0.1*(Math.random()-0.5);
+        const flashColor = new THREE.Color().setHSL(0.55 + 0.05*Math.sin(_flashPhase*0.7), 1.0, 0.7);
+        innerMaterial.color.copy(flashColor);
+        innerMaterial.opacity = Math.min(1.0, innerMaterial.opacity + 0.15*flashPulse);
+        const s = 0.96 + 0.06*flashPulse; innerSphere.scale.set(s,s,s);
+        if (performance.now() >= _flashEndAt){ _flashActive = false; }
+      } else {
+        // Drift back to base blue
+        innerMaterial.color.lerp(new THREE.Color(0x0077FF), 0.08);
+      }
+      renderer.render(scene,camera);
+    }
     resize(); animate(); window.addEventListener('resize', resize);
 
     // Progress (no hex overlay now)
-    function setProgress(p){ progress = Math.max(0, Math.min(100, p|0)); }
+    function setProgress(p){
+      progress = Math.max(0, Math.min(100, p|0));
+      _progressTarget = progress;
+    }
     // Noise terminal elements (lighter)
     const term = document.getElementById('term');
     const termInner = document.getElementById('termInner');
@@ -839,14 +886,13 @@ def _build_html(self) -> str:
     function setDockWidth(r){ document.documentElement.style.setProperty('--dockW', ((r*100)|0)+'%'); resize(); }
     window.__vidiumSetProgress = setProgress;
     window.__vidiumAppendLog = appendLog;
-    window.__vidiumSetOffsetRatio = function(r){
-      offsetRatio = Math.max(-0.5, Math.min(0.5, r));
-      group.position.x = offsetRatio;
-    };
+    window.__vidiumSetOffsetRatio = function(r){ offsetRatio = Math.max(-0.5, Math.min(0.5, r)); group.position.x = offsetRatio; };
     window.__vidiumSetDockWidth = setDockWidth;
-    window.__vidiumSetCanvasOffset = function(x,y){
-      canvasOffsetX = isFinite(x) ? x : 0; canvasOffsetY = isFinite(y) ? y : 0; applyCanvasOffset();
-    };
+    window.__vidiumSetCanvasOffset = function(x,y){ canvasOffsetX = isFinite(x) ? x : 0; canvasOffsetY = isFinite(y) ? y : 0; applyCanvasOffset(); };
+    // New staged visuals API
+    window.__vidiumSetStages = function(n){ _numStages = Math.max(1, Math.min(3, n|0)); };
+    window.__vidiumSetStageIndex = function(i){ _stageIndex = Math.max(0, Math.min(2, i|0)); };
+    window.__vidiumResetVisuals = function(){ _resetVisuals(); };
   </script>
  </body>
  </html>
@@ -1147,7 +1193,7 @@ class MainWindow(QMainWindow): # main app window
         self.download_conversion_worker = None
         self.preview_conversion_worker = None
         self.trim_worker = None
-        self.gpu_checkbox = QCheckBox("Use GPU (Very Fast)")
+        self.gpu_checkbox = QCheckBox("Use GPU")
         try:
             self.gpu_checkbox.setChecked(self.settings.value("gpu_enabled", True, type=bool))
             self.gpu_checkbox.setStyleSheet("color: #00FFFF;")
@@ -1171,7 +1217,7 @@ class MainWindow(QMainWindow): # main app window
         # Replace countdown with static iteration label
         self.countdown_secs = None
         if hasattr(self, 'time_label'):
-            self.time_label.setText("Iteration: 2V")
+            self.time_label.setText("Iteration: 0.2V")
 
     def eventFilter(self, obj, event): 
         if hasattr(self, 'video_widget') and obj == self.video_widget and self.conversion_active:
@@ -1193,7 +1239,7 @@ class MainWindow(QMainWindow): # main app window
         self.logo_label.setObjectName("Logo")
         self.status_label = QLabel("STATUS: IDLE")
         self.status_label.setObjectName("Status")
-        self.time_label = QLabel("Iteration: 2V")
+        self.time_label = QLabel("Iteration: 0.2V")
         self.time_label.setObjectName("Time")
         opacity = QGraphicsOpacityEffect(self.status_label)
         self.status_label.setGraphicsEffect(opacity)
@@ -1568,7 +1614,7 @@ class MainWindow(QMainWindow): # main app window
                 pass
         dlc.addWidget(self.download_output_format_combo, 0, Qt.AlignVCenter)
         # Download GPU checkbox (matches Convert tab behavior)
-        self.download_gpu_checkbox = QCheckBox("Use GPU (Very Fast)")
+        self.download_gpu_checkbox = QCheckBox("Use GPU")
         try:
             self.download_gpu_checkbox.setChecked(True)
             self.download_gpu_checkbox.setStyleSheet("color: #00FFFF;")
@@ -1721,8 +1767,8 @@ class MainWindow(QMainWindow): # main app window
 
     def _tick_countdown(self):
         # No-op with static iteration text
-        if hasattr(self, 'time_label') and self.time_label.text() != "Iteration: 2V":
-            self.time_label.setText("Iteration: 2V")
+        if hasattr(self, 'time_label') and self.time_label.text() != "Iteration: 0.2V":
+            self.time_label.setText("Iteration: 0.2V")
 
     def _align_download_url_width(self):
         try:
@@ -2124,7 +2170,8 @@ class MainWindow(QMainWindow): # main app window
                 try:
                     if hasattr(self, 'convert_terminal'):
                         self.convert_terminal._auto_scroll_enabled = False
-                        self.convert_terminal._direction = +1  # scroll down when enabled
+                        # Convert terminal should drift downward by default during processing
+                        self.convert_terminal._direction = +1
                 except Exception:
                     pass
                 self.file_timer.start(500)
@@ -2196,9 +2243,16 @@ class MainWindow(QMainWindow): # main app window
                 self.sphere_view.set_progress(100)
             except Exception:
                 pass
+        # Reset sphere visuals 5 seconds after completion
+        try:
+            if WEBENGINE_AVAILABLE and hasattr(self, 'sphere_view') and hasattr(self.sphere_view, 'page'):
+                self.sphere_view.page().runJavaScript("setTimeout(()=>{window.__vidiumResetVisuals && window.__vidiumResetVisuals();}, 5000);")
+        except Exception:
+            pass
         # After conversion, enable auto-scroll and drift upward a touch faster, then fade
         try:
             if hasattr(self, 'convert_terminal'):
+                # After completion, drift upward (ambient) in Convert tab
                 self.convert_terminal._direction = -1
                 self.convert_terminal._auto_scroll_enabled = True
                 # Slightly faster base speed for end‑of‑process ambient drift
@@ -2484,7 +2538,8 @@ class MainWindow(QMainWindow): # main app window
             try:
                 if hasattr(self, 'download_terminal'):
                     self.download_terminal._auto_scroll_enabled = True
-                    self.download_terminal._direction = +1
+                    # Upward drift for download tab as well
+                    self.download_terminal._direction = -1
             except Exception:
                 pass
         try:
@@ -2497,7 +2552,8 @@ class MainWindow(QMainWindow): # main app window
         try:
             if hasattr(self, 'download_terminal'):
                 self.download_terminal._auto_scroll_enabled = True
-                self.download_terminal._direction = -1  # ambient upward drift after finish
+                # Upward ambient drift for the Download tab
+                self.download_terminal._direction = -1
                 self.download_terminal._drift_base_speed = 8.0
         except Exception:
             pass
@@ -2507,6 +2563,12 @@ class MainWindow(QMainWindow): # main app window
             self.download_progress_bar.setValue(100)
             if hasattr(self, 'download_sphere_view'):
                 self.download_sphere_view.set_progress(100)
+        except Exception:
+            pass
+        # Reset download sphere visuals 5 seconds after completion
+        try:
+            if WEBENGINE_AVAILABLE and hasattr(self, 'download_sphere_view') and hasattr(self.download_sphere_view, 'page'):
+                self.download_sphere_view.page().runJavaScript("setTimeout(()=>{window.__vidiumResetVisuals && window.__vidiumResetVisuals();}, 5000);")
         except Exception:
             pass
 
@@ -2577,7 +2639,7 @@ class MainWindow(QMainWindow): # main app window
         try:
             if hasattr(self, 'download_terminal'):
                 self.download_terminal._auto_scroll_enabled = True
-                self.download_terminal._direction = +1
+                self.download_terminal._direction = -1
         except Exception:
             pass
 
@@ -2595,7 +2657,7 @@ class MainWindow(QMainWindow): # main app window
         try:
             if hasattr(self, 'download_terminal'):
                 self.download_terminal._auto_scroll_enabled = True
-                self.download_terminal._direction = +1
+                self.download_terminal._direction = -1
         except Exception:
             pass
 
@@ -2671,11 +2733,38 @@ class MainWindow(QMainWindow): # main app window
         if hasattr(self, 'sphere_view'):
             try:
                 self.sphere_view.set_progress(0)
+                if WEBENGINE_AVAILABLE:
+                    # One-stage by default on Convert tab
+                    self.sphere_view.page().runJavaScript("window.__vidiumSetStages && window.__vidiumSetStages(1);")
+                    self.sphere_view.page().runJavaScript("window.__vidiumSetStageIndex && window.__vidiumSetStageIndex(0);")
+                    self.sphere_view.page().runJavaScript("window.__vidiumResetVisuals && window.__vidiumResetVisuals();")
             except Exception:
                 pass
         if hasattr(self, 'download_sphere_view'):
             try:
                 self.download_sphere_view.set_progress(0)
+                if WEBENGINE_AVAILABLE:
+                    # Set staged visuals based on mode
+                    mode = self.download_mode_combo.currentText()
+                    const_js = []
+                    if mode == "Download Only":
+                        const_js = ["window.__vidiumSetStages && window.__vidiumSetStages(1);",
+                                    "window.__vidiumSetStageIndex && window.__vidiumSetStageIndex(0);"]
+                    elif mode in ("Download & Convert", "Download & Trim"):
+                        const_js = ["window.__vidiumSetStages && window.__vidiumSetStages(2);",
+                                    "window.__vidiumSetStageIndex && window.__vidiumSetStageIndex(0);"]
+                    else:
+                        const_js = ["window.__vidiumSetStages && window.__vidiumSetStages(3);",
+                                    "window.__vidiumSetStageIndex && window.__vidiumSetStageIndex(0);"]
+                    for line in const_js:
+                        try:
+                            self.download_sphere_view.page().runJavaScript(line)
+                        except Exception:
+                            pass
+                    try:
+                        self.download_sphere_view.page().runJavaScript("window.__vidiumResetVisuals && window.__vidiumResetVisuals();")
+                    except Exception:
+                        pass
             except Exception:
                 pass
         # Initialize staged boundaries based on selected mode
@@ -2695,7 +2784,7 @@ class MainWindow(QMainWindow): # main app window
         try:
             if hasattr(self, 'download_terminal'):
                 self.download_terminal._auto_scroll_enabled = False
-                self.download_terminal._direction = +1
+                self.download_terminal._direction = -1
         except Exception:
             pass
         # Ensure any prior worker is cleanly stopped to avoid QThread destruction crash
@@ -2792,6 +2881,11 @@ class MainWindow(QMainWindow): # main app window
                 self._dl_stage = 1
                 self.status_label.setText("STATUS: CONVERTING...")
                 self.download_conversion_worker.progressUpdated.connect(self._on_download_conversion_progress)
+                if WEBENGINE_AVAILABLE and hasattr(self, 'download_sphere_view'):
+                    try:
+                        self.download_sphere_view.page().runJavaScript("window.__vidiumSetStageIndex && window.__vidiumSetStageIndex(1);")
+                    except Exception:
+                        pass
             except Exception:
                 pass
             self.download_conversion_worker.start()
@@ -2855,17 +2949,23 @@ class MainWindow(QMainWindow): # main app window
     @Slot(str)
     def append_log(self, text):
         self.log_text_edit.appendPlainText(text)
-        # Mirror to the active tab's inline terminal only
-        if self.tab_widget.currentIndex() == 0 and hasattr(self, 'convert_terminal'):
-            try:
+        # Append to both terminals so they stay in sync across tabs
+        try:
+            if hasattr(self, 'convert_terminal'):
                 self.convert_terminal.append_scrolling(text)
-            except Exception:
-                self.convert_terminal.appendPlainText(text)
-        elif self.tab_widget.currentIndex() == 1 and hasattr(self, 'download_terminal'):
+        except Exception:
             try:
-                self.download_terminal.append_scrolling(text)
+                self.convert_terminal.appendPlainText(text)
             except Exception:
+                pass
+        try:
+            if hasattr(self, 'download_terminal'):
+                self.download_terminal.append_scrolling(text)
+        except Exception:
+            try:
                 self.download_terminal.appendPlainText(text)
+            except Exception:
+                pass
         if hasattr(self, 'sphere_view'):
             try:
                 self.sphere_view.append_log(text)

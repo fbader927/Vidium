@@ -1003,6 +1003,48 @@ class ConversionWorker(QThread): # worker thread for handling video conversion w
                     f"Conversion failed for {self.input_file} (return code {process.returncode}). Log: {log}")
             return log
 
+    async def _call_convert_file_with_compat(self, convert_func, *args, **kwargs) -> str:
+        """Call converter.convert_file while tolerating older signatures that lack new callbacks."""
+        progress_cb = kwargs.get("progress_callback")
+        log_cb = kwargs.get("log_callback")
+        attempt_kwargs = dict(kwargs)
+        unsupported = set()
+        logged = set()
+        while True:
+            try:
+                result = await convert_func(*args, **attempt_kwargs)
+                if progress_cb and "progress_callback" in unsupported:
+                    try:
+                        progress_cb(100)
+                    except Exception:
+                        pass
+                return result
+            except TypeError as exc:
+                msg = str(exc)
+                removed_key = None
+                for key in ("progress_callback", "log_callback"):
+                    if key in attempt_kwargs and key in msg:
+                        removed_key = key
+                        attempt_kwargs.pop(key, None)
+                        unsupported.add(key)
+                        break
+                if removed_key is None:
+                    raise
+                if removed_key not in logged:
+                    if removed_key == "progress_callback" and progress_cb:
+                        try:
+                            progress_cb(0)
+                        except Exception:
+                            pass
+                    if log_cb:
+                        notice = "progress updates" if removed_key == "progress_callback" else "log streaming"
+                        try:
+                            log_cb(f"[compat] Converter module lacks {notice}; continuing without it.\n")
+                        except Exception:
+                            pass
+                    logged.add(removed_key)
+                # loop retries with the reduced keyword set
+
     async def do_conversion(self): # handle different file types and prepare ffmpeg argument
         from converter import run_ffmpeg, get_input_bitrate, convert_file
         ext = os.path.splitext(self.output_file)[1].lower()
@@ -1129,9 +1171,16 @@ class ConversionWorker(QThread): # worker thread for handling video conversion w
                     self.logMessage.emit(chunk)
                 except Exception:
                     pass
-            log = await convert_file(self.input_file, self.output_file, base_extra_args,
-                                     use_gpu=self.use_gpu, stop_event=self._stop_event,
-                                     progress_callback=_on_progress, log_callback=_on_log)
+            log = await self._call_convert_file_with_compat(
+                convert_file,
+                self.input_file,
+                self.output_file,
+                base_extra_args,
+                use_gpu=self.use_gpu,
+                stop_event=self._stop_event,
+                progress_callback=_on_progress,
+                log_callback=_on_log,
+            )
         else: # for unsupported extensions just use extra_args
             from converter import convert_file
             def _on_progress2(pct: int):
@@ -1144,9 +1193,15 @@ class ConversionWorker(QThread): # worker thread for handling video conversion w
                     self.logMessage.emit(chunk)
                 except Exception:
                     pass
-            log = await convert_file(self.input_file, self.output_file, self.extra_args,
-                                     stop_event=self._stop_event,
-                                     progress_callback=_on_progress2, log_callback=_on_log2)
+            log = await self._call_convert_file_with_compat(
+                convert_file,
+                self.input_file,
+                self.output_file,
+                self.extra_args,
+                stop_event=self._stop_event,
+                progress_callback=_on_progress2,
+                log_callback=_on_log2,
+            )
         return log
 
     def run(self): # entry point for when thread starts
